@@ -206,6 +206,7 @@ def build_training_row(
 def build_training_dataset(
     tickers: list[str],
     include_sentiment: bool = True,
+    max_samples_per_ticker: int | None = None,
 ) -> pd.DataFrame:
     """Build a training dataset with properly time-aligned features.
 
@@ -223,6 +224,9 @@ def build_training_dataset(
     Args:
         tickers: List of ticker symbols.
         include_sentiment: Whether to add sentiment features.
+        max_samples_per_ticker: Maximum rows per ticker. ``None`` keeps
+            every valid trading day (full dataset). Pass an integer
+            (e.g. 200) to linearly sample down.
 
     Returns:
         DataFrame ready for model training.
@@ -270,11 +274,14 @@ def build_training_dataset(
             if valid_df.empty:
                 continue
 
-            # Sample up to 200 data points per ticker
-            sample_indices = np.linspace(
-                0, len(valid_df) - 1, min(200, len(valid_df)), dtype=int
-            )
-            sampled = valid_df.iloc[sample_indices]
+            # Optionally subsample; default keeps every valid day
+            if max_samples_per_ticker is not None and len(valid_df) > max_samples_per_ticker:
+                sample_indices = np.linspace(
+                    0, len(valid_df) - 1, max_samples_per_ticker, dtype=int
+                )
+                sampled = valid_df.iloc[sample_indices]
+            else:
+                sampled = valid_df
 
             # Extract actual calendar dates for time-alignment
             if "Date" in sampled.columns:
