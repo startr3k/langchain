@@ -16,6 +16,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from stock_predictor.agent.agent import run_agent
+from stock_predictor.data.feature_engineering import (
+    ALL_FEATURE_NAMES,
+    TARGET_COLUMN,
+    build_training_dataset,
+)
 from stock_predictor.data.sentiment import get_sentiment_summary, get_trending_tickers_from_social
 from stock_predictor.data.yfinance_client import get_stock_data, get_stock_info, NASDAQ_TOP_TICKERS
 from stock_predictor.models.automl_model import StockReturnPredictor
@@ -276,44 +281,110 @@ elif page == "Model Training":
     tickers = NASDAQ_TOP_TICKERS[:num_tickers]
     st.write(f"Training tickers: {', '.join(tickers)}")
 
-    if st.button("Start Training", type="primary"):
-        predictor = StockReturnPredictor()
-        progress_bar = st.progress(0)
-        status = st.empty()
+    train_col, data_col = st.columns(2)
 
-        status.info("Building training dataset (this may take several minutes)...")
-        progress_bar.progress(10)
+    with train_col:
+        if st.button("Start Training", type="primary"):
+            predictor = StockReturnPredictor()
+            progress_bar = st.progress(0)
+            status = st.empty()
 
-        try:
-            metrics = predictor.train(
-                tickers=tickers,
-                time_budget=time_budget,
-                include_sentiment=include_sentiment,
-            )
-            progress_bar.progress(100)
-            status.success("Training complete!")
+            status.info("Building training dataset (this may take several minutes)...")
+            progress_bar.progress(10)
 
-            st.subheader("Training Results")
-            st.json(metrics)
-
-            # Feature importance
-            importance = predictor.get_feature_importance(top_n=15)
-            if importance:
-                st.subheader("Top Feature Importances")
-                import plotly.express as px
-                import pandas as pd
-
-                imp_df = pd.DataFrame(importance, columns=["Feature", "Importance"])
-                fig = px.bar(
-                    imp_df, x="Importance", y="Feature",
-                    orientation="h", title="Feature Importance",
+            try:
+                metrics = predictor.train(
+                    tickers=tickers,
+                    time_budget=time_budget,
+                    include_sentiment=include_sentiment,
                 )
-                fig.update_layout(height=500)
+                progress_bar.progress(100)
+                status.success("Training complete!")
+
+                st.subheader("Training Results")
+                st.json(metrics)
+
+                # Feature importance
+                importance = predictor.get_feature_importance(top_n=15)
+                if importance:
+                    st.subheader("Top Feature Importances")
+                    import plotly.express as px
+                    import pandas as pd
+
+                    imp_df = pd.DataFrame(importance, columns=["Feature", "Importance"])
+                    fig = px.bar(
+                        imp_df, x="Importance", y="Feature",
+                        orientation="h", title="Feature Importance",
+                    )
+                    fig.update_layout(height=500)
+                    st.plotly_chart(fig, use_container_width=True)
+
+            except Exception as e:
+                progress_bar.progress(0)
+                status.error(f"Training failed: {e}")
+
+    with data_col:
+        if st.button("Generate & Preview Training Data"):
+            with st.spinner("Building training dataset (fetching data from YFinance)..."):
+                try:
+                    training_df = build_training_dataset(
+                        tickers, include_sentiment=include_sentiment,
+                    )
+                    if training_df.empty:
+                        st.warning("No training data could be generated.")
+                    else:
+                        st.session_state["training_data"] = training_df
+                        st.success(
+                            f"Generated {len(training_df)} training samples "
+                            f"across {training_df['Ticker'].nunique()} tickers "
+                            f"with {len(training_df.columns)} columns."
+                        )
+                except Exception as e:
+                    st.error(f"Error generating training data: {e}")
+
+    # Display training data if available
+    if "training_data" in st.session_state:
+        training_df = st.session_state["training_data"]
+        st.markdown("---")
+        st.subheader("Training Data Preview")
+
+        # Summary stats
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Total Samples", len(training_df))
+        with col_b:
+            st.metric("Tickers", training_df["Ticker"].nunique())
+        with col_c:
+            st.metric("Features", len(training_df.columns) - 2)  # exclude Ticker & target
+
+        # Target distribution
+        if TARGET_COLUMN in training_df.columns:
+            target_vals = training_df[TARGET_COLUMN].dropna()
+            if not target_vals.empty:
+                import plotly.express as px
+
+                st.subheader("Target Distribution (6-Month Forward Return)")
+                fig = px.histogram(
+                    target_vals, nbins=50,
+                    labels={"value": "6-Month Return", "count": "Count"},
+                    title="Distribution of Forward Returns",
+                )
+                fig.update_layout(height=350)
                 st.plotly_chart(fig, use_container_width=True)
 
-        except Exception as e:
-            progress_bar.progress(0)
-            status.error(f"Training failed: {e}")
+        # Data table
+        st.subheader("Data Table")
+        st.dataframe(training_df, use_container_width=True, height=400)
+
+        # Download button
+        csv = training_df.to_csv(index=False)
+        st.download_button(
+            label="Download Training Data as CSV",
+            data=csv,
+            file_name="stock_predictor_training_data.csv",
+            mime="text/csv",
+            type="primary",
+        )
 
     # Model status
     st.markdown("---")
