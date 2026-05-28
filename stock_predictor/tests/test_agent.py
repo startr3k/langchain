@@ -80,8 +80,8 @@ class TestStockPredictorTool:
         mock_predictor.is_trained = True
         mock_predictor.predict_ticker.return_value = {
             "ticker": "AAPL",
-            "predicted_return_6m": 0.35,
-            "predicted_return_6m_pct": "35.00%",
+            "predicted_return_3m": 0.35,
+            "predicted_return_3m_pct": "35.00%",
         }
         mock_predictor.get_feature_importance.return_value = [
             ("RSI_14", 0.15),
@@ -92,7 +92,7 @@ class TestStockPredictorTool:
         result = stock_predictor_tool.invoke({"ticker": "AAPL"})
         parsed = json.loads(result)
         assert parsed["ticker"] == "AAPL"
-        assert parsed["predicted_return_6m"] == 0.35
+        assert parsed["predicted_return_3m"] == 0.35
 
     @patch("stock_predictor.agent.tools._get_predictor")
     def test_untrained_model_error(self, mock_get_pred):

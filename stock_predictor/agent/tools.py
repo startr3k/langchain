@@ -3,7 +3,7 @@
 Three tools:
 1. YFinanceTool — fetches market data and fundamentals
 2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz / StockTwits
-3. StockPredictorTool — runs the AutoML model to predict 6-month returns
+3. StockPredictorTool — runs the AutoML model to predict 3-month returns
 """
 
 from __future__ import annotations
@@ -131,7 +131,7 @@ def social_media_listener_tool(ticker: str) -> str:
 
 @tool
 def stock_predictor_tool(ticker: str) -> str:
-    """Predict the 6-month forward return for a stock using the trained AutoML model.
+    """Predict the 3-month forward return for a stock using the trained AutoML model.
 
     This tool combines YFinance data and social media sentiment features, then
     runs them through the trained prediction model. Use this AFTER gathering
@@ -141,7 +141,7 @@ def stock_predictor_tool(ticker: str) -> str:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA').
 
     Returns:
-        JSON with the predicted 6-month return percentage and model confidence.
+        JSON with the predicted 3-month return percentage and model confidence.
     """
     predictor = _get_predictor()
 
@@ -166,7 +166,7 @@ def stock_predictor_tool(ticker: str) -> str:
 
 @tool
 def scan_trending_stocks_tool(top_n: int = 10) -> str:
-    """Scan trending NASDAQ stocks and predict their 6-month returns.
+    """Scan trending NASDAQ stocks and predict their 3-month returns.
 
     Identifies trending stocks from social media and runs the prediction
     model on each to find high-return candidates.
@@ -196,12 +196,12 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
     for ticker in all_tickers:
         try:
             prediction = predictor.predict_ticker(ticker)
-            if prediction.get("predicted_return_6m") is not None:
+            if prediction.get("predicted_return_3m") is not None:
                 results.append(prediction)
         except Exception:
             logger.warning("Failed to predict for %s", ticker)
 
-    results.sort(key=lambda x: x.get("predicted_return_6m", -999), reverse=True)
+    results.sort(key=lambda x: x.get("predicted_return_3m", -999), reverse=True)
 
     return json.dumps(
         {

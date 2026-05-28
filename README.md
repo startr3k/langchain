@@ -11,7 +11,7 @@ stock_predictor/
 │   ├── sentiment.py          # Social media sentiment (Reddit, Finviz, StockTwits)
 │   └── feature_engineering.py # Feature pipeline combining all data sources
 ├── models/
-│   ├── automl_model.py       # FLAML AutoML model for 6-month return prediction
+│   ├── automl_model.py       # FLAML AutoML model for 3-month return prediction
 │   └── saved/                # Persisted trained models
 ├── agent/
 │   ├── agent.py              # OpenAI LLM agent with ReAct loop
@@ -27,7 +27,7 @@ stock_predictor/
 - Trains on historical YFinance data + social media sentiment features
 - Uses FLAML to automatically select the best model (XGBoost, LightGBM, Random Forest)
 - 40+ features including technical indicators, fundamentals, and sentiment scores
-- Predicts 6-month forward returns for any NASDAQ stock
+- Predicts 3-month forward returns for any NASDAQ stock
 
 ### 2. Social Media Sentiment Analysis
 - **Reddit**: Scans r/wallstreetbets, r/stocks, r/investing, r/StockMarket, etc.
@@ -89,7 +89,7 @@ print(metrics)
 ```python
 from stock_predictor.agent.agent import run_agent
 
-response = run_agent("Which NASDAQ stocks could return 100% in 6 months?")
+response = run_agent("Which NASDAQ stocks have the best predicted returns next month?")
 print(response)
 ```
 

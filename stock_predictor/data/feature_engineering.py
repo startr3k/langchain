@@ -52,7 +52,7 @@ SENTIMENT_FEATURES = [
 
 ALL_FEATURE_NAMES = TECHNICAL_FEATURES + FUNDAMENTAL_FEATURES + SENTIMENT_FEATURES
 
-TARGET_COLUMN = "Forward_Return_6M"
+TARGET_COLUMN = "Forward_Return_3M"
 
 
 def build_training_row(
@@ -104,7 +104,7 @@ def build_training_dataset(
     """Build a training dataset across multiple tickers.
 
     For training, we use historical data points. The target is the actual
-    6-month forward return computed from historical prices.
+    3-month forward return computed from historical prices.
 
     Args:
         tickers: List of ticker symbols.
@@ -124,8 +124,8 @@ def build_training_dataset(
 
             df = compute_technical_features(df)
 
-            # Compute 6-month forward return (~126 trading days)
-            df[TARGET_COLUMN] = df["Close"].shift(-126) / df["Close"] - 1
+            # Compute 3-month forward return (~63 trading days)
+            df[TARGET_COLUMN] = df["Close"].shift(-63) / df["Close"] - 1
 
             # Fundamentals (static, applied to all rows)
             fundamentals = get_fundamentals_features(ticker)

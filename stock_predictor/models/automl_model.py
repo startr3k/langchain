@@ -135,7 +135,7 @@ class StockReturnPredictor:
         return metrics
 
     def predict(self, features: dict | pd.DataFrame) -> float:
-        """Predict 6-month forward return.
+        """Predict 3-month forward return.
 
         Args:
             features: Feature dict or DataFrame row.
@@ -165,7 +165,7 @@ class StockReturnPredictor:
         return float(prediction[0])
 
     def predict_ticker(self, ticker: str) -> dict:
-        """Predict 6-month return for a given ticker.
+        """Predict 3-month return for a given ticker.
 
         Args:
             ticker: Stock ticker symbol.
@@ -177,15 +177,15 @@ class StockReturnPredictor:
         if row is None:
             return {
                 "ticker": ticker,
-                "predicted_return_6m": None,
+                "predicted_return_3m": None,
                 "error": "Could not build features for ticker.",
             }
 
         predicted_return = self.predict(row)
         return {
             "ticker": ticker,
-            "predicted_return_6m": round(predicted_return, 4),
-            "predicted_return_6m_pct": f"{predicted_return * 100:.2f}%",
+            "predicted_return_3m": round(predicted_return, 4),
+            "predicted_return_3m_pct": f"{predicted_return * 100:.2f}%",
         }
 
     def save(self) -> None:

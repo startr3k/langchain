@@ -93,7 +93,7 @@ if page == "AI Stock Advisor":
 
     # Chat input
     user_input = st.chat_input(
-        "Ask about stocks (e.g., 'Which NASDAQ stocks could return 100% in 6 months?')"
+        "Ask about stocks (e.g., 'Which NASDAQ stocks have the best 3-month outlook?')"
     )
 
     if user_input:
@@ -134,8 +134,8 @@ if page == "AI Stock Advisor":
     with col1:
         if st.button("Top NASDAQ picks for 100% return"):
             st.session_state["_quick_prompt"] = (
-                "Which NASDAQ stocks have the highest potential for 100% return "
-                "in the next 6 months? Scan trending stocks and give me your top 5 picks."
+                "Which NASDAQ stocks have the highest potential for strong returns "
+                "in the next 3 months? Scan trending stocks and give me your top 5 picks."
             )
             st.rerun()
     with col2:
@@ -149,7 +149,7 @@ if page == "AI Stock Advisor":
         if st.button("AI/Tech sector analysis"):
             st.session_state["_quick_prompt"] = (
                 "Analyze AI and tech stocks in NASDAQ. Which ones are most likely "
-                "to outperform in the next 6 months based on sentiment and technicals?"
+                "to outperform in the next 3 months based on sentiment and technicals?"
             )
             st.rerun()
 
@@ -216,10 +216,10 @@ elif page == "Stock Analysis":
                 predictor = StockReturnPredictor()
                 predictor.load()
                 result = predictor.predict_ticker(ticker)
-                if result.get("predicted_return_6m") is not None:
-                    ret = result["predicted_return_6m"]
+                if result.get("predicted_return_3m") is not None:
+                    ret = result["predicted_return_3m"]
                     st.metric(
-                        "Predicted 6-Month Return",
+                        "Predicted 3-Month Return",
                         f"{ret * 100:.2f}%",
                         delta=f"{ret * 100:.2f}%",
                     )
@@ -349,10 +349,10 @@ elif page == "Model Training":
             if not target_vals.empty:
                 import plotly.express as px
 
-                st.subheader("Target Distribution (6-Month Forward Return)")
+                st.subheader("Target Distribution (3-Month Forward Return)")
                 fig = px.histogram(
                     target_vals, nbins=50,
-                    labels={"value": "6-Month Return", "count": "Count"},
+                    labels={"value": "3-Month Return", "count": "Count"},
                     title="Distribution of Forward Returns",
                 )
                 fig.update_layout(height=350)
@@ -475,33 +475,33 @@ elif page == "Batch Predictions":
             for i, ticker in enumerate(tickers):
                 progress.progress((i + 1) / len(tickers))
                 result = predictor.predict_ticker(ticker)
-                if result.get("predicted_return_6m") is not None:
+                if result.get("predicted_return_3m") is not None:
                     results.append(result)
 
-            results.sort(key=lambda x: x["predicted_return_6m"], reverse=True)
+            results.sort(key=lambda x: x["predicted_return_3m"], reverse=True)
 
             st.subheader(f"Results ({len(results)} stocks)")
 
             df = pd.DataFrame(results)
             df = df.rename(columns={
                 "ticker": "Ticker",
-                "predicted_return_6m": "Predicted Return (6M)",
-                "predicted_return_6m_pct": "Predicted Return %",
+                "predicted_return_3m": "Predicted Return (3M)",
+                "predicted_return_3m_pct": "Predicted Return %",
             })
             st.dataframe(df, use_container_width=True)
 
             # Highlight stocks with >100% predicted return
-            high_return = [r for r in results if r["predicted_return_6m"] >= 1.0]
+            high_return = [r for r in results if r.get("predicted_return_3m", 0) >= 0.5]
             if high_return:
                 st.success(
-                    f"Found {len(high_return)} stocks with predicted 100%+ return!"
+                    f"Found {len(high_return)} stocks with predicted 50%+ 3-month return!"
                 )
                 for r in high_return:
                     st.write(
-                        f"**{r['ticker']}**: {r['predicted_return_6m_pct']} predicted return"
+                        f"**{r['ticker']}**: {r['predicted_return_3m_pct']} predicted return"
                     )
             else:
-                st.info("No stocks with predicted 100%+ return found in this batch.")
+                st.info("No stocks with predicted 50%+ 3-month return found in this batch.")
 
         except FileNotFoundError:
             st.error("Model not trained yet. Go to 'Model Training' first.")

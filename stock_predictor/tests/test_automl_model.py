@@ -140,8 +140,8 @@ class TestStockReturnPredictor:
             result = predictor.predict_ticker("AAPL")
 
         assert result["ticker"] == "AAPL"
-        assert result["predicted_return_6m"] is not None
-        assert "predicted_return_6m_pct" in result
+        assert result["predicted_return_3m"] is not None
+        assert "predicted_return_3m_pct" in result
 
     def test_predict_ticker_no_data(self):
         predictor = StockReturnPredictor()
@@ -154,7 +154,7 @@ class TestStockReturnPredictor:
         ):
             result = predictor.predict_ticker("INVALID")
 
-        assert result["predicted_return_6m"] is None
+        assert result["predicted_return_3m"] is None
         assert "error" in result
 
     def test_get_feature_importance(self):
@@ -194,4 +194,4 @@ class TestFeatureEngineering:
         )
 
     def test_target_column_defined(self):
-        assert TARGET_COLUMN == "Forward_Return_6M"
+        assert TARGET_COLUMN == "Forward_Return_3M"
