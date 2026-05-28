@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 EARNINGS_FEATURES = [
     "earnings_surprise_pct",
     "earnings_eps_actual",
-    "earnings_eps_estimate",
     "days_since_last_earnings",
     "days_to_next_earnings",
 ]

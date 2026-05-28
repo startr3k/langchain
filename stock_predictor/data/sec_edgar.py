@@ -29,10 +29,6 @@ _CIK_CACHE: dict[str, str] = {}
 SEC_FEATURES = [
     "sec_revenue",
     "sec_net_income",
-    "sec_eps",
-    "sec_total_assets",
-    "sec_total_liabilities",
-    "sec_stockholders_equity",
     "sec_operating_cash_flow",
     "sec_filing_age_days",
 ]

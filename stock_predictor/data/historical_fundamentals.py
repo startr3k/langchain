@@ -21,30 +21,24 @@ logger = logging.getLogger(__name__)
 HIST_FUNDAMENTAL_FEATURES = [
     # Income statement
     "hist_total_revenue",
-    "hist_gross_profit",
     "hist_operating_income",
     "hist_net_income",
     "hist_diluted_eps",
-    "hist_ebitda",
     # Margins (derived)
-    "hist_gross_margin",
     "hist_operating_margin",
     "hist_profit_margin",
-    "hist_ebitda_margin",
     # Balance sheet
     "hist_total_assets",
     "hist_total_debt",
     "hist_stockholders_equity",
     "hist_book_value_per_share",
     "hist_current_assets",
-    "hist_current_liabilities",
     # Ratios (derived)
     "hist_debt_to_equity",
     "hist_current_ratio",
     "hist_roe",
     "hist_roa",
     # Cash flow
-    "hist_free_cash_flow",
     "hist_capex",
     # Growth (QoQ)
     "hist_revenue_growth_qoq",

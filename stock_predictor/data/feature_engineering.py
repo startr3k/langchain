@@ -60,15 +60,14 @@ logger = logging.getLogger(__name__)
 
 TECHNICAL_FEATURES = [
     "Return_1d", "Return_5d", "Return_20d", "Return_60d",
-    "SMA_5", "SMA_10", "SMA_20", "SMA_50", "SMA_200",
-    "EMA_5", "EMA_10", "EMA_20", "EMA_50", "EMA_200",
+    "SMA_20", "SMA_50", "SMA_200",
+    "EMA_200",
     "Price_to_SMA_20", "Price_to_SMA_50", "Price_to_SMA_200",
     "Volatility_20d", "Volatility_60d",
     "Volume_Ratio", "Volume_Spike", "Volume_Spike_Magnitude",
-    "RSI_14", "MACD", "MACD_Signal", "MACD_Hist",
+    "RSI_14", "MACD", "MACD_Hist",
     "BB_Width", "BB_Position",
-    "ATR_14",
-    "OBV", "OBV_SMA_20",
+    "OBV",
 ]
 
 # Current-snapshot fundamentals (used for live prediction only)
@@ -86,7 +85,7 @@ FUNDAMENTAL_FEATURES = [
     # Growth
     "revenueGrowth",
     # Risk / leverage
-    "beta", "debtToEquity", "currentRatio", "quickRatio",
+    "beta", "debtToEquity", "currentRatio",
     # Ownership / sentiment
     "shortRatio", "shortPercentOfFloat",
     "heldPercentInsiders", "heldPercentInstitutions",

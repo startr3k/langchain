@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 
 MACRO_FEATURES = [
     "vix_close",
-    "vix_sma_20",
     "treasury_10y",
-    "treasury_2y",
     "yield_curve_spread",
     "sp500_return_20d",
     "sp500_return_60d",
