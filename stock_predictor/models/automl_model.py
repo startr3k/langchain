@@ -15,6 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from flaml import AutoML, tune
+from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -100,6 +101,7 @@ MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
 SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
+CLIP_BOUNDS_PATH = MODEL_DIR / "feature_clip_bounds.pkl"
 
 
 class StockReturnPredictor:
@@ -110,6 +112,8 @@ class StockReturnPredictor:
         self.feature_names: list[str] = []
         self.feature_medians: pd.Series | None = None
         self.scaler: StandardScaler | None = None
+        self.clip_lower: pd.Series | None = None
+        self.clip_upper: pd.Series | None = None
         self.is_trained = False
 
     def train(
@@ -149,6 +153,16 @@ class StockReturnPredictor:
         X = X[valid]
         y = y[valid]
 
+        # Clip extreme target values to reduce outlier influence.
+        # Returns beyond [-100%, +300%] are rare and destabilise
+        # gradient-based learners.
+        lower, upper = -1.0, 3.0
+        n_clipped = int(((y < lower) | (y > upper)).sum())
+        y = y.clip(lower=lower, upper=upper)
+        if n_clipped > 0:
+            logger.info("Clipped %d extreme target values to [%.0f%%, %.0f%%]",
+                        n_clipped, lower * 100, upper * 100)
+
         # Semantically fill profit-related NaN values: these are NaN
         # because the company is unprofitable, not because data is
         # missing.  Using meaningful defaults preserves this signal.
@@ -160,6 +174,13 @@ class StockReturnPredictor:
         # Fill remaining NaN features with median and save medians for prediction
         self.feature_medians = X.median()
         X = X.fillna(self.feature_medians)
+
+        # Winsorize features at 1st/99th percentiles to clip extreme
+        # outliers while preserving the overall distribution shape.
+        # Bounds are saved for consistent clipping at prediction time.
+        self.clip_lower = X.quantile(0.01)
+        self.clip_upper = X.quantile(0.99)
+        X = X.clip(lower=self.clip_lower, upper=self.clip_upper, axis=1)
 
         # --- Temporal train/test split to avoid data leakage ---
         # Sort by date so split is chronological, not random
@@ -200,18 +221,22 @@ class StockReturnPredictor:
 
         # Regularization-constrained search to prevent overfitting:
         # - shallow trees (max_depth ≤ 8)
+        # - low learning rate (0.01-0.1) for gradual learning
         # - high min samples per leaf
         # - subsampling rows + columns
-        # - early stopping after 50 rounds without improvement
         custom_hp = {
             "xgboost": {
                 "max_depth": {
                     "domain": tune.randint(3, 9),
-                    "init_value": 6,
+                    "init_value": 5,
                 },
                 "min_child_weight": {
                     "domain": tune.randint(10, 101),
                     "init_value": 30,
+                },
+                "learning_rate": {
+                    "domain": tune.loguniform(0.01, 0.1),
+                    "init_value": 0.05,
                 },
                 "subsample": {
                     "domain": tune.uniform(0.5, 0.9),
@@ -233,11 +258,15 @@ class StockReturnPredictor:
             "lgbm": {
                 "max_depth": {
                     "domain": tune.randint(3, 9),
-                    "init_value": 6,
+                    "init_value": 5,
                 },
                 "min_child_samples": {
                     "domain": tune.randint(50, 501),
                     "init_value": 100,
+                },
+                "learning_rate": {
+                    "domain": tune.loguniform(0.01, 0.1),
+                    "init_value": 0.05,
                 },
                 "subsample": {
                     "domain": tune.uniform(0.5, 0.9),
@@ -292,6 +321,13 @@ class StockReturnPredictor:
         y_pred_train = self.automl.predict(X_train)
         r2_train = r2_score(y_train, y_pred_train)
 
+        # Ridge baseline for comparison (sanity check)
+        ridge = Ridge(alpha=1.0)
+        ridge.fit(X_train, y_train)
+        ridge_pred = ridge.predict(X_test)
+        ridge_r2 = r2_score(y_test, ridge_pred)
+        ridge_mae = mean_absolute_error(y_test, ridge_pred)
+
         metrics = {
             "best_estimator": self.automl.best_estimator,
             "best_config": self.automl.best_config,
@@ -304,12 +340,14 @@ class StockReturnPredictor:
             "mae": round(mae, 4),
             "rmse": round(rmse, 4),
             "mape": round(mape, 2),
+            "ridge_r2": round(ridge_r2, 4),
+            "ridge_mae": round(ridge_mae, 4),
         }
 
         logger.info(
             "Training complete. Best: %s | Test R²=%.4f | Train R²=%.4f | "
-            "MAE=%.4f | RMSE=%.4f",
-            self.automl.best_estimator, r2, r2_train, mae, rmse,
+            "MAE=%.4f | RMSE=%.4f | Ridge R²=%.4f",
+            self.automl.best_estimator, r2, r2_train, mae, rmse, ridge_r2,
         )
         self.save()
         return metrics
@@ -342,6 +380,9 @@ class StockReturnPredictor:
             df = df.fillna(self.feature_medians)
         else:
             df = df.fillna(0.0)
+
+        if self.clip_lower is not None and self.clip_upper is not None:
+            df = df.clip(lower=self.clip_lower, upper=self.clip_upper, axis=1)
 
         if self.scaler is not None:
             df = pd.DataFrame(
@@ -384,6 +425,7 @@ class StockReturnPredictor:
         joblib.dump(self.feature_names, FEATURE_NAMES_PATH)
         joblib.dump(self.feature_medians, MEDIANS_PATH)
         joblib.dump(self.scaler, SCALER_PATH)
+        joblib.dump((self.clip_lower, self.clip_upper), CLIP_BOUNDS_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
     def load(self) -> None:
@@ -398,6 +440,8 @@ class StockReturnPredictor:
             self.feature_medians = joblib.load(MEDIANS_PATH)
         if SCALER_PATH.exists():
             self.scaler = joblib.load(SCALER_PATH)
+        if CLIP_BOUNDS_PATH.exists():
+            self.clip_lower, self.clip_upper = joblib.load(CLIP_BOUNDS_PATH)
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 
