@@ -16,7 +16,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-SEC_EDGAR_BASE = "https://data.sec.gov"
+SEC_EDGAR_BASE = "https://www.sec.gov"
+SEC_EDGAR_API = "https://data.sec.gov"
 SEC_HEADERS = {
     "User-Agent": "StockPredictor Research research@example.com",
     "Accept-Encoding": "gzip, deflate",
@@ -43,14 +44,6 @@ def _get_cik(ticker: str) -> str | None:
         return _CIK_CACHE[ticker]
 
     try:
-        url = f"{SEC_EDGAR_BASE}/submissions/CIK{ticker.upper()}.json"
-        # Try ticker-based lookup first (doesn't always work)
-        resp = requests.get(
-            "https://efts.sec.gov/LATEST/search-index?q=%22{}%22&dateRange=custom&startdt=2020-01-01&forms=10-K,10-Q".format(ticker),
-            headers=SEC_HEADERS,
-            timeout=10,
-        )
-
         # Use the company tickers JSON for reliable lookup
         tickers_url = f"{SEC_EDGAR_BASE}/files/company_tickers.json"
         resp = requests.get(tickers_url, headers=SEC_HEADERS, timeout=10)
@@ -82,7 +75,7 @@ def get_sec_filings(ticker: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     try:
-        url = f"{SEC_EDGAR_BASE}/api/xbrl/companyfacts/CIK{cik}.json"
+        url = f"{SEC_EDGAR_API}/api/xbrl/companyfacts/CIK{cik}.json"
         resp = requests.get(url, headers=SEC_HEADERS, timeout=15)
         time.sleep(0.15)  # SEC rate limit: 10 req/sec
 
@@ -112,7 +105,11 @@ def get_sec_filings(ticker: str) -> pd.DataFrame:
                             values[end] = float(val)
             return values
 
-        revenue = _extract_quarterly("Revenues") or _extract_quarterly("RevenueFromContractWithCustomerExcludingAssessedTax")
+        revenue = (
+            _extract_quarterly("Revenues")
+            or _extract_quarterly("RevenueFromContractWithCustomerExcludingAssessedTax")
+            or _extract_quarterly("SalesRevenueNet")
+        )
         net_income = _extract_quarterly("NetIncomeLoss")
         eps = _extract_quarterly("EarningsPerShareDiluted")
         total_assets = _extract_quarterly("Assets")

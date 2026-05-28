@@ -75,15 +75,40 @@ def get_historical_fundamentals(ticker: str) -> pd.DataFrame:
     """
     try:
         stock = yf.Ticker(ticker)
-        inc = stock.quarterly_financials
-        bs = stock.quarterly_balance_sheet
-        cf = stock.quarterly_cashflow
 
-        if inc is None or inc.empty:
-            logger.debug("No quarterly financials for %s", ticker)
+        # Combine quarterly + annual data for broader coverage
+        # YFinance quarterly only provides ~5 recent quarters;
+        # annual provides ~5 years with one data point per year.
+        inc_q = stock.quarterly_financials
+        bs_q = stock.quarterly_balance_sheet
+        cf_q = stock.quarterly_cashflow
+
+        inc_a = stock.financials
+        bs_a = stock.balance_sheet
+        cf_a = stock.cashflow
+
+        def _merge_frames(quarterly, annual):
+            """Merge quarterly and annual, preferring quarterly when dates overlap."""
+            if quarterly is None or quarterly.empty:
+                return annual if annual is not None and not annual.empty else pd.DataFrame()
+            if annual is None or annual.empty:
+                return quarterly
+            # Use quarterly dates + any annual dates not in quarterly
+            q_dates = set(quarterly.columns)
+            extra_annual_dates = [d for d in annual.columns if d not in q_dates]
+            if extra_annual_dates:
+                return pd.concat([quarterly, annual[extra_annual_dates]], axis=1)
+            return quarterly
+
+        inc = _merge_frames(inc_q, inc_a)
+        bs = _merge_frames(bs_q, bs_a)
+        cf = _merge_frames(cf_q, cf_a)
+
+        if inc.empty:
+            logger.debug("No financials data for %s", ticker)
             return pd.DataFrame()
 
-        # Columns are Timestamps of quarter-end dates (newest first)
+        # Columns are Timestamps of period-end dates
         quarters = sorted(inc.columns)
 
         records: list[dict] = []

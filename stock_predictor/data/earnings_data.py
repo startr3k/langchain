@@ -37,11 +37,17 @@ def get_earnings_history(ticker: str) -> pd.DataFrame:
         if ed is None or ed.empty:
             return pd.DataFrame()
 
-        result = pd.DataFrame(index=ed.index)
-        result.index = pd.to_datetime(result.index.tz_localize(None) if result.index.tz else result.index)
-        result["earnings_surprise_pct"] = pd.to_numeric(ed.get("Surprise(%)"), errors="coerce")
-        result["earnings_eps_actual"] = pd.to_numeric(ed.get("Reported EPS"), errors="coerce")
-        result["earnings_eps_estimate"] = pd.to_numeric(ed.get("EPS Estimate"), errors="coerce")
+        # Strip timezone from index to avoid alignment issues
+        idx = ed.index
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        idx = pd.to_datetime(idx)
+
+        result = pd.DataFrame({
+            "earnings_surprise_pct": pd.to_numeric(ed["Surprise(%)"].values, errors="coerce"),
+            "earnings_eps_actual": pd.to_numeric(ed["Reported EPS"].values, errors="coerce"),
+            "earnings_eps_estimate": pd.to_numeric(ed["EPS Estimate"].values, errors="coerce"),
+        }, index=idx)
 
         # Only keep rows where earnings have actually been reported
         result = result.dropna(subset=["earnings_eps_actual"])

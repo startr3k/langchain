@@ -272,7 +272,16 @@ def build_training_dataset(
                 0, len(valid_df) - 1, min(200, len(valid_df)), dtype=int
             )
             sampled = valid_df.iloc[sample_indices]
-            sample_dates = sampled.index
+
+            # Extract actual calendar dates for time-alignment
+            if "Date" in sampled.columns:
+                sample_dates = pd.to_datetime(
+                    sampled["Date"].dt.tz_localize(None)
+                    if hasattr(sampled["Date"].dt, "tz_localize") and sampled["Date"].dt.tz is not None
+                    else sampled["Date"]
+                )
+            else:
+                sample_dates = pd.to_datetime(sampled.index)
 
             # --- Time-align historical features to each sample date ---
             aligned_hist_fund = align_fundamentals_to_dates(hist_fund, sample_dates)
@@ -283,7 +292,9 @@ def build_training_dataset(
 
             for i, (idx, row) in enumerate(sampled.iterrows()):
                 data_point: dict = {"Ticker": ticker}
-                data_point["_date"] = idx if isinstance(idx, str) else str(idx)
+                # Store actual calendar date for temporal splitting
+                date_val = sample_dates.iloc[i] if hasattr(sample_dates, "iloc") else sample_dates[i]
+                data_point["_date"] = str(date_val)
 
                 # Technical features (inherently time-correct)
                 for col in TECHNICAL_FEATURES:
