@@ -6,12 +6,16 @@ data that was available at that point in time, eliminating look-ahead bias.
 Data sources:
 1. Technical indicators (from price/volume — inherently time-correct)
 2. Historical quarterly fundamentals (YFinance quarterly filings)
-3. Current-snapshot fundamentals (used only for live prediction, NOT training)
-4. Macroeconomic data (VIX, rates, S&P500 — properly time-indexed)
-5. Earnings surprise history (YFinance earnings_dates)
-6. Google Trends (historical search interest)
-7. SEC EDGAR XBRL (historical regulatory filings)
-8. Sentiment (current snapshot — used for both training and prediction)
+3. Macroeconomic data (VIX, rates, S&P500 — properly time-indexed)
+4. Earnings surprise history (YFinance earnings_dates)
+5. Google Trends (historical search interest)
+6. SEC EDGAR XBRL (historical regulatory filings)
+
+Excluded from model (data leakage risk):
+- Current-snapshot fundamentals: today's values applied to all historical
+  rows causes look-ahead bias.  Kept in agent/UI output only.
+- Sentiment: today's news headlines applied uniformly to historical rows.
+  Kept in agent/UI output only.
 """
 
 from __future__ import annotations
@@ -70,7 +74,9 @@ TECHNICAL_FEATURES = [
     "OBV",
 ]
 
-# Current-snapshot fundamentals (used for live prediction only)
+# Current-snapshot fundamentals — EXCLUDED from model training/prediction
+# due to data leakage (today's values applied to all historical rows).
+# Kept here for reference and used in agent/UI output only.
 FUNDAMENTAL_FEATURES = [
     # Valuation ratios
     "marketCap", "trailingPE", "forwardPE", "priceToBook",
@@ -94,6 +100,9 @@ FUNDAMENTAL_FEATURES = [
     "daysToEarnings",
 ]
 
+# Sentiment features — EXCLUDED from model training/prediction
+# due to data leakage (today's headlines applied to all historical rows).
+# Kept here for reference and used in agent/UI output only.
 SENTIMENT_FEATURES = [
     # Aggregated sentiment (derived from available sources)
     "sentiment_mean_polarity", "sentiment_std_polarity",
@@ -104,17 +113,17 @@ SENTIMENT_FEATURES = [
 ]
 
 # All features used by the model (training + prediction).
+# Only time-aligned features are included — no current-snapshot
+# fundamentals or sentiment (data leakage).
 # Google Trends features are excluded from the default list because
 # Google aggressively rate-limits cloud/datacenter IPs; they are
 # added dynamically when data is actually available.
 ALL_FEATURE_NAMES = (
     TECHNICAL_FEATURES
-    + FUNDAMENTAL_FEATURES
     + HIST_FUNDAMENTAL_FEATURES
     + MACRO_FEATURES
     + EARNINGS_FEATURES
     + SEC_FEATURES
-    + SENTIMENT_FEATURES
 )
 
 TARGET_COLUMN = "Forward_Return_3M"
@@ -126,12 +135,14 @@ def build_training_row(
 ) -> dict | None:
     """Build a single feature row (latest data point) for a ticker.
 
-    Used for live prediction — includes current-snapshot fundamentals
-    plus the latest historical data.
+    Used for live prediction — uses only time-aligned features that
+    match the model's training feature set (no current-snapshot
+    fundamentals or sentiment).
 
     Args:
         ticker: Stock ticker symbol.
-        include_sentiment: Whether to add sentiment features.
+        include_sentiment: Ignored (kept for API compatibility).
+            Sentiment features are excluded from the model.
 
     Returns:
         Dictionary of feature values or None on failure.
@@ -147,11 +158,6 @@ def build_training_row(
         row: dict = {"Ticker": ticker}
         for col in TECHNICAL_FEATURES:
             row[col] = latest.get(col, np.nan)
-
-        # Current-snapshot fundamentals (acceptable for live prediction)
-        fundamentals = get_fundamentals_features(ticker)
-        for col in FUNDAMENTAL_FEATURES:
-            row[col] = fundamentals.get(col, np.nan)
 
         # Historical fundamentals (latest quarter)
         hist_fund = get_historical_fundamentals(ticker)
@@ -190,12 +196,6 @@ def build_training_row(
             for col in SEC_FEATURES:
                 row[col] = aligned[col].iloc[0] if col in aligned.columns else np.nan
 
-        # Sentiment
-        if include_sentiment:
-            sentiment = get_sentiment_features(ticker)
-            for col in SENTIMENT_FEATURES:
-                row[col] = sentiment.get(col, 0.0)
-
         return row
     except Exception:
         logger.exception("Error building feature row for %s", ticker)
@@ -217,12 +217,13 @@ def build_training_dataset(
     - Earnings surprise: aligned to the most recent reported earnings
     - Google Trends: aligned to the most recent weekly data
     - SEC EDGAR: aligned to the most recent filing date
-    - Current-snapshot fundamentals: applied uniformly (documented limitation)
-    - Sentiment: current snapshot (documented limitation)
+
+    Current-snapshot fundamentals and sentiment are EXCLUDED to
+    prevent data leakage.
 
     Args:
         tickers: List of ticker symbols.
-        include_sentiment: Whether to add sentiment features.
+        include_sentiment: Ignored (kept for API compatibility).
         max_samples_per_ticker: Maximum rows per ticker. ``None`` keeps
             every valid trading day (full dataset). Pass an integer
             (e.g. 200) to linearly sample down.
@@ -257,14 +258,6 @@ def build_training_dataset(
             earnings_df = get_earnings_history(ticker)
             trends_df = get_google_trends(ticker)
             sec_df = get_sec_filings(ticker)
-
-            # Current-snapshot fundamentals (documented limitation)
-            fundamentals = get_fundamentals_features(ticker)
-
-            # Sentiment (current snapshot — documented limitation)
-            sentiment: dict = {}
-            if include_sentiment:
-                sentiment = get_sentiment_features(ticker)
 
             # Filter valid rows
             valid_mask = df[TARGET_COLUMN].notna() & df["SMA_200"].notna()
@@ -309,10 +302,6 @@ def build_training_dataset(
                 for col in TECHNICAL_FEATURES:
                     data_point[col] = row.get(col, np.nan)
 
-                # Current-snapshot fundamentals (limitation documented)
-                for col in FUNDAMENTAL_FEATURES:
-                    data_point[col] = fundamentals.get(col, np.nan)
-
                 # Historical fundamentals (time-aligned, no leakage)
                 for col in HIST_FUNDAMENTAL_FEATURES:
                     data_point[col] = (
@@ -353,10 +342,6 @@ def build_training_dataset(
                         if col in aligned_sec.columns
                         else np.nan
                     )
-
-                # Sentiment (current snapshot — documented limitation)
-                for col in SENTIMENT_FEATURES:
-                    data_point[col] = sentiment.get(col, 0.0)
 
                 data_point[TARGET_COLUMN] = row[TARGET_COLUMN]
                 all_rows.append(data_point)

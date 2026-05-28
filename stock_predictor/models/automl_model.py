@@ -28,6 +28,39 @@ from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
 
 logger = logging.getLogger(__name__)
 
+# Profit-related features where NaN means "unprofitable", not
+# "data missing".  Using meaningful defaults preserves this signal
+# instead of hiding it behind a median.
+_SEMANTIC_NAN_FILLS: dict[str, float] = {
+    # Margins → -1.0 signals negative profitability
+    "hist_profit_margin": -1.0,
+    "hist_operating_margin": -1.0,
+    # Returns → -1.0 signals negative returns on capital
+    "hist_roe": -1.0,
+    "hist_roa": -1.0,
+    # Absolute income → 0.0 signals zero/no earnings
+    "hist_net_income": 0.0,
+    "hist_operating_income": 0.0,
+    "hist_diluted_eps": 0.0,
+    # Earnings surprise → 0.0 when there are no earnings to beat/miss
+    "earnings_surprise_pct": 0.0,
+    "earnings_eps_actual": 0.0,
+}
+
+
+def _fill_semantic_nan(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill profit-related NaN with meaningful defaults.
+
+    These NaN values arise because the company is unprofitable or
+    pre-revenue — they are not randomly missing data.  Imputing them
+    with the column median would mask a real signal.
+    """
+    for col, fill_value in _SEMANTIC_NAN_FILLS.items():
+        if col in df.columns:
+            df[col] = df[col].fillna(fill_value)
+    return df
+
+
 MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
@@ -79,6 +112,11 @@ class StockReturnPredictor:
         valid = y.notna()
         X = X[valid]
         y = y[valid]
+
+        # Semantically fill profit-related NaN values: these are NaN
+        # because the company is unprofitable, not because data is
+        # missing.  Using meaningful defaults preserves this signal.
+        X = _fill_semantic_nan(X)
 
         # Fill remaining NaN features with median and save medians for prediction
         self.feature_medians = X.median()
@@ -184,6 +222,7 @@ class StockReturnPredictor:
             if col not in df.columns:
                 df[col] = 0.0
         df = df[self.feature_names]
+        df = _fill_semantic_nan(df)
         if self.feature_medians is not None:
             df = df.fillna(self.feature_medians)
         else:

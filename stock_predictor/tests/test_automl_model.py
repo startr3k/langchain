@@ -199,15 +199,15 @@ class TestFeatureEngineering:
         assert len(EARNINGS_FEATURES) > 0
         assert len(TRENDS_FEATURES) > 0
         assert len(SEC_FEATURES) > 0
-        # Google Trends excluded from ALL_FEATURE_NAMES (rate-limited)
+        # ALL_FEATURE_NAMES excludes FUNDAMENTAL_FEATURES and
+        # SENTIMENT_FEATURES (data leakage) and Google Trends
+        # (rate-limited).
         expected_total = (
             len(TECHNICAL_FEATURES)
-            + len(FUNDAMENTAL_FEATURES)
             + len(HIST_FUNDAMENTAL_FEATURES)
             + len(MACRO_FEATURES)
             + len(EARNINGS_FEATURES)
             + len(SEC_FEATURES)
-            + len(SENTIMENT_FEATURES)
         )
         assert len(ALL_FEATURE_NAMES) == expected_total
 

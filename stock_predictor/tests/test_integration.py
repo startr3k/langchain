@@ -15,8 +15,6 @@ import pytest
 
 from stock_predictor.data.feature_engineering import (
     ALL_FEATURE_NAMES,
-    FUNDAMENTAL_FEATURES,
-    SENTIMENT_FEATURES,
     TARGET_COLUMN,
     TECHNICAL_FEATURES,
     build_training_row,
@@ -43,24 +41,11 @@ def _make_price_df(n: int = 300) -> pd.DataFrame:
 class TestEndToEndPipeline:
     """Test the full pipeline: data collection -> feature engineering -> prediction."""
 
-    @patch("stock_predictor.data.feature_engineering.get_sentiment_features")
-    @patch("stock_predictor.data.feature_engineering.get_fundamentals_features")
     @patch("stock_predictor.data.feature_engineering.get_stock_data")
-    def test_build_training_row(self, mock_data, mock_fund, mock_sent):
+    def test_build_training_row(self, mock_data):
         mock_data.return_value = _make_price_df(300)
-        mock_fund.return_value = {"marketCap": 3e12, "trailingPE": 30.0, "beta": 1.1}
-        mock_sent.return_value = {
-            "sentiment_mean_polarity": 0.2,
-            "sentiment_std_polarity": 0.1,
-            "sentiment_max_polarity": 0.5,
-            "sentiment_min_polarity": -0.1,
-            "sentiment_mean_subjectivity": 0.5,
-            "sentiment_total_mentions": 20,
-            "finviz_mention_count": 5,
-            "finviz_mean_polarity": 0.3,
-        }
 
-        row = build_training_row("AAPL", include_sentiment=True)
+        row = build_training_row("AAPL")
         assert row is not None
         assert row["Ticker"] == "AAPL"
 
@@ -68,21 +53,17 @@ class TestEndToEndPipeline:
         for col in TECHNICAL_FEATURES:
             assert col in row, f"Missing technical feature: {col}"
 
-        # Check sentiment features
-        assert row["sentiment_mean_polarity"] == 0.2
-        assert row["finviz_mention_count"] == 5
+        # Snapshot fundamentals and sentiment should NOT be in the row
+        assert "marketCap" not in row
+        assert "sentiment_mean_polarity" not in row
 
-    @patch("stock_predictor.data.feature_engineering.get_sentiment_features")
-    @patch("stock_predictor.data.feature_engineering.get_fundamentals_features")
     @patch("stock_predictor.data.feature_engineering.get_stock_data")
-    def test_full_train_predict_cycle(self, mock_data, mock_fund, mock_sent):
+    def test_full_train_predict_cycle(self, mock_data):
         """Test training a model and making predictions end-to-end."""
         mock_data.return_value = _make_price_df(300)
-        mock_fund.return_value = {"marketCap": 3e12, "trailingPE": 30.0}
-        mock_sent.return_value = {k: 0.5 for k in SENTIMENT_FEATURES}
 
         # Build a row
-        row = build_training_row("TEST", include_sentiment=True)
+        row = build_training_row("TEST")
         assert row is not None
 
         # Create synthetic training data
