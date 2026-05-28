@@ -66,6 +66,8 @@ TECHNICAL_FEATURES = [
     "Return_1d", "Return_5d", "Return_20d", "Return_60d",
     # Normalized price-relative ratios (not raw dollar values)
     "Price_to_SMA_20", "Price_to_SMA_50", "Price_to_SMA_200",
+    # SMA 200 cross signals
+    "SMA_200_Cross", "Days_Since_SMA200_Cross",
     "Volatility_20d", "Volatility_60d",
     "Volume_Ratio", "Volume_Spike", "Volume_Spike_Magnitude",
     "RSI_14", "MACD", "MACD_Hist",

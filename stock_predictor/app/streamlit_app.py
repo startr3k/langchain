@@ -216,13 +216,15 @@ elif page == "Stock Analysis":
                 predictor = StockReturnPredictor()
                 predictor.load()
                 result = predictor.predict_ticker(ticker)
-                if result.get("predicted_return_3m") is not None:
-                    ret = result["predicted_return_3m"]
-                    st.metric(
-                        "Predicted 3-Month Return",
-                        f"{ret * 100:.2f}%",
-                        delta=f"{ret * 100:.2f}%",
+                if result.get("probability_30pct_gain") is not None:
+                    prob = result["probability_30pct_gain"]
+                    signal = result.get("signal", "HOLD")
+                    col_a, col_b = st.columns(2)
+                    col_a.metric(
+                        "P(≥30% gain in 3M)",
+                        f"{prob * 100:.1f}%",
                     )
+                    col_b.metric("Signal", signal)
                 else:
                     st.info(result.get("error", "Prediction unavailable."))
             except FileNotFoundError:
@@ -380,18 +382,17 @@ elif page == "Model Training":
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            r2_val = metrics.get("r2_score", 0)
             st.metric(
-                "R² Score (Test)",
-                f"{r2_val:.4f}",
-                help="Out-of-sample coefficient of determination (1.0 = perfect)",
+                "AUC-ROC (Test)",
+                f"{metrics.get('auc_roc', 0):.4f}",
+                help="Area Under ROC Curve on held-out test set (0.5 = random, 1.0 = perfect)",
             )
         with m2:
-            st.metric("MAE (Test)", f"{metrics.get('mae', 0):.4f}", help="Mean Absolute Error on held-out test set")
+            st.metric("Precision (Test)", f"{metrics.get('precision', 0):.4f}", help="Of predicted positives, how many were correct")
         with m3:
-            st.metric("RMSE (Test)", f"{metrics.get('rmse', 0):.4f}", help="Root Mean Squared Error on held-out test set")
+            st.metric("Recall (Test)", f"{metrics.get('recall', 0):.4f}", help="Of actual positives, how many were found")
         with m4:
-            st.metric("MAPE (Test)", f"{metrics.get('mape', 0):.1f}%", help="Mean Absolute Percentage Error on held-out test set")
+            st.metric("F1 Score (Test)", f"{metrics.get('f1_score', 0):.4f}", help="Harmonic mean of precision and recall")
 
         m5, m6, m7, m8 = st.columns(4)
         with m5:
@@ -399,13 +400,12 @@ elif page == "Model Training":
         with m6:
             st.metric("Training Samples", metrics.get("training_samples", 0))
         with m7:
-            st.metric("Test Samples", metrics.get("test_samples", 0))
+            st.metric("Accuracy (Test)", f"{metrics.get('accuracy', 0):.4f}")
         with m8:
-            r2_train = metrics.get("r2_train", 0)
             st.metric(
-                "R² (Train)",
-                f"{r2_train:.4f}",
-                help="Training set R² — compare with Test R² to detect overfitting",
+                "AUC (Train)",
+                f"{metrics.get('auc_train', 0):.4f}",
+                help="Training AUC — compare with Test AUC to detect overfitting",
             )
 
         with st.expander("Full Training Configuration"):
@@ -486,33 +486,33 @@ elif page == "Batch Predictions":
             for i, ticker in enumerate(tickers):
                 progress.progress((i + 1) / len(tickers))
                 result = predictor.predict_ticker(ticker)
-                if result.get("predicted_return_3m") is not None:
+                if result.get("probability_30pct_gain") is not None:
                     results.append(result)
 
-            results.sort(key=lambda x: x["predicted_return_3m"], reverse=True)
+            results.sort(key=lambda x: x["probability_30pct_gain"], reverse=True)
 
             st.subheader(f"Results ({len(results)} stocks)")
 
             df = pd.DataFrame(results)
             df = df.rename(columns={
                 "ticker": "Ticker",
-                "predicted_return_3m": "Predicted Return (3M)",
-                "predicted_return_3m_pct": "Predicted Return %",
+                "probability_30pct_gain": "P(≥30% gain)",
+                "probability_pct": "Probability %",
+                "signal": "Signal",
             })
             st.dataframe(df, use_container_width=True)
 
-            # Highlight stocks with >100% predicted return
-            high_return = [r for r in results if r.get("predicted_return_3m", 0) >= 0.5]
-            if high_return:
+            buy_signals = [r for r in results if r.get("signal") == "BUY"]
+            if buy_signals:
                 st.success(
-                    f"Found {len(high_return)} stocks with predicted 50%+ 3-month return!"
+                    f"Found {len(buy_signals)} stocks with BUY signal (≥50% probability of 30%+ gain)!"
                 )
-                for r in high_return:
+                for r in buy_signals:
                     st.write(
-                        f"**{r['ticker']}**: {r['predicted_return_3m_pct']} predicted return"
+                        f"**{r['ticker']}**: {r['probability_pct']} probability of ≥30% gain"
                     )
             else:
-                st.info("No stocks with predicted 50%+ 3-month return found in this batch.")
+                st.info("No stocks with BUY signal found in this batch.")
 
         except FileNotFoundError:
             st.error("Model not trained yet. Go to 'Model Training' first.")

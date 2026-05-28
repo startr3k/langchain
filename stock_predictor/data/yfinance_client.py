@@ -79,6 +79,16 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["Price_to_SMA_50"] = df["Close"] / df["SMA_50"]
     df["Price_to_SMA_200"] = df["Close"] / df["SMA_200"]
 
+    # SMA 200 cross signal: detect when price crosses the 200-day MA
+    above_sma200 = (df["Close"] > df["SMA_200"]).astype(int)
+    cross = above_sma200.diff()
+    # +1 = bullish cross (price moved above), -1 = bearish cross (below)
+    df["SMA_200_Cross"] = cross.fillna(0)
+    # Days since last cross event
+    cross_occurred = cross.abs() > 0
+    cross_groups = cross_occurred.cumsum()
+    df["Days_Since_SMA200_Cross"] = cross_groups.groupby(cross_groups).cumcount()
+
     # Volatility
     df["Volatility_20d"] = df["Return_1d"].rolling(window=20).std()
     df["Volatility_60d"] = df["Return_1d"].rolling(window=60).std()

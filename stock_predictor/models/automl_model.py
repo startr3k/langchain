@@ -1,7 +1,8 @@
-"""AutoML model for stock return prediction using FLAML.
+"""AutoML model for stock return classification using FLAML.
 
+Predicts whether a stock will achieve >=30% return over 3 months.
 FLAML (Fast Lightweight AutoML) automatically selects the best model
-and hyperparameters from XGBoost, LightGBM, Random Forest, etc.
+and hyperparameters from XGBoost, LightGBM, etc.
 """
 
 from __future__ import annotations
@@ -15,8 +16,15 @@ import joblib
 import numpy as np
 import pandas as pd
 from flaml import AutoML, tune
-from sklearn.linear_model import Ridge
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
@@ -104,8 +112,16 @@ SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
 CLIP_BOUNDS_PATH = MODEL_DIR / "feature_clip_bounds.pkl"
 
 
+# Classification threshold: predict class 1 when Forward_Return_3M >= 30%
+CLASSIFICATION_THRESHOLD = 0.30
+
+
 class StockReturnPredictor:
-    """AutoML-based stock return predictor."""
+    """AutoML-based stock return classifier.
+
+    Predicts class 1 (>=30% 3-month return) vs class 0 (otherwise).
+    Uses class weights to handle 6.4:1 imbalance and AUC as metric.
+    """
 
     def __init__(self) -> None:
         self.automl = AutoML()
@@ -153,15 +169,22 @@ class StockReturnPredictor:
         X = X[valid]
         y = y[valid]
 
-        # Clip extreme target values to reduce outlier influence.
-        # Returns beyond [-100%, +300%] are rare and destabilise
-        # gradient-based learners.
-        lower, upper = -1.0, 3.0
-        n_clipped = int(((y < lower) | (y > upper)).sum())
-        y = y.clip(lower=lower, upper=upper)
-        if n_clipped > 0:
-            logger.info("Clipped %d extreme target values to [%.0f%%, %.0f%%]",
-                        n_clipped, lower * 100, upper * 100)
+        # Convert continuous return to binary classification target:
+        # 1 = return >= 30%, 0 = otherwise
+        y_binary = (y >= CLASSIFICATION_THRESHOLD).astype(int)
+        n_pos = int(y_binary.sum())
+        n_neg = len(y_binary) - n_pos
+        logger.info(
+            "Class balance: %d positive (%.1f%%) / %d negative (%.1f%%)",
+            n_pos, n_pos / len(y_binary) * 100,
+            n_neg, n_neg / len(y_binary) * 100,
+        )
+        y = y_binary
+
+        # Compute class weights for imbalanced data
+        weight_neg = 1.0
+        weight_pos = n_neg / max(n_pos, 1)
+        sample_weight = y.map({0: weight_neg, 1: weight_pos}).values
 
         # Semantically fill profit-related NaN values: these are NaN
         # because the company is unprofitable, not because data is
@@ -287,46 +310,70 @@ class StockReturnPredictor:
             },
         }
 
+        # Split sample weights to match train/test
+        sw_train = sample_weight[:split_idx]
+        sw_test = sample_weight[split_idx + gap_rows:len(sample_weight)]
+
         self.automl.fit(
             X_train=X_train,
             y_train=y_train,
-            task="regression",
+            task="classification",
             time_budget=time_budget,
-            metric="r2",
+            metric="roc_auc",
             estimator_list=["xgboost", "lgbm"],
             eval_method="cv",
             n_splits=5,
             verbose=0,
             custom_hp=custom_hp,
             early_stop=True,
+            sample_weight=sw_train,
         )
 
         self.is_trained = True
 
         # --- Out-of-sample metrics on held-out test set ---
         y_pred_test = self.automl.predict(X_test)
-        r2 = r2_score(y_test, y_pred_test)
-        mae = mean_absolute_error(y_test, y_pred_test)
-        rmse = float(np.sqrt(mean_squared_error(y_test, y_pred_test)))
-        nonzero_mask = y_test.abs() > 1e-8
-        if nonzero_mask.sum() > 0:
-            mape = float(
-                ((y_test[nonzero_mask] - y_pred_test[nonzero_mask]).abs()
-                 / y_test[nonzero_mask].abs()).mean() * 100
-            )
+        y_proba_test = self.automl.predict_proba(X_test)
+        # Use probability of class 1
+        if y_proba_test.ndim == 2:
+            y_proba_pos = y_proba_test[:, 1]
         else:
-            mape = float("nan")
+            y_proba_pos = y_proba_test
+
+        accuracy = accuracy_score(y_test, y_pred_test)
+        precision = precision_score(y_test, y_pred_test, zero_division=0)
+        recall = recall_score(y_test, y_pred_test, zero_division=0)
+        f1 = f1_score(y_test, y_pred_test, zero_division=0)
+        try:
+            auc = roc_auc_score(y_test, y_proba_pos)
+        except ValueError:
+            auc = float("nan")
 
         # Training-set metrics for comparison (to detect overfitting)
         y_pred_train = self.automl.predict(X_train)
-        r2_train = r2_score(y_train, y_pred_train)
+        y_proba_train = self.automl.predict_proba(X_train)
+        if y_proba_train.ndim == 2:
+            y_proba_train_pos = y_proba_train[:, 1]
+        else:
+            y_proba_train_pos = y_proba_train
+        try:
+            auc_train = roc_auc_score(y_train, y_proba_train_pos)
+        except ValueError:
+            auc_train = float("nan")
+        accuracy_train = accuracy_score(y_train, y_pred_train)
 
-        # Ridge baseline for comparison (sanity check)
-        ridge = Ridge(alpha=1.0)
-        ridge.fit(X_train, y_train)
-        ridge_pred = ridge.predict(X_test)
-        ridge_r2 = r2_score(y_test, ridge_pred)
-        ridge_mae = mean_absolute_error(y_test, ridge_pred)
+        # Logistic Regression baseline for comparison
+        lr = LogisticRegression(
+            class_weight="balanced", max_iter=1000, random_state=42,
+        )
+        lr.fit(X_train, y_train)
+        lr_pred = lr.predict(X_test)
+        lr_proba = lr.predict_proba(X_test)[:, 1]
+        lr_accuracy = accuracy_score(y_test, lr_pred)
+        try:
+            lr_auc = roc_auc_score(y_test, lr_proba)
+        except ValueError:
+            lr_auc = float("nan")
 
         metrics = {
             "best_estimator": self.automl.best_estimator,
@@ -335,31 +382,34 @@ class StockReturnPredictor:
             "training_samples": len(X_train),
             "test_samples": len(X_test),
             "num_features": len(feature_cols),
-            "r2_score": round(r2, 4),
-            "r2_train": round(r2_train, 4),
-            "mae": round(mae, 4),
-            "rmse": round(rmse, 4),
-            "mape": round(mape, 2),
-            "ridge_r2": round(ridge_r2, 4),
-            "ridge_mae": round(ridge_mae, 4),
+            "class_balance": f"{n_pos}/{n_neg} ({n_pos/(n_pos+n_neg)*100:.1f}%)",
+            "accuracy": round(accuracy, 4),
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
+            "f1_score": round(f1, 4),
+            "auc_roc": round(auc, 4),
+            "accuracy_train": round(accuracy_train, 4),
+            "auc_train": round(auc_train, 4),
+            "lr_accuracy": round(lr_accuracy, 4),
+            "lr_auc": round(lr_auc, 4),
         }
 
         logger.info(
-            "Training complete. Best: %s | Test R²=%.4f | Train R²=%.4f | "
-            "MAE=%.4f | RMSE=%.4f | Ridge R²=%.4f",
-            self.automl.best_estimator, r2, r2_train, mae, rmse, ridge_r2,
+            "Training complete. Best: %s | Test AUC=%.4f | Train AUC=%.4f | "
+            "Accuracy=%.4f | F1=%.4f | LR AUC=%.4f",
+            self.automl.best_estimator, auc, auc_train, accuracy, f1, lr_auc,
         )
         self.save()
         return metrics
 
     def predict(self, features: dict | pd.DataFrame) -> float:
-        """Predict 3-month forward return.
+        """Predict probability of >=30% 3-month return.
 
         Args:
             features: Feature dict or DataFrame row.
 
         Returns:
-            Predicted return as a float (e.g. 0.25 means +25%).
+            Probability of class 1 (>=30% return) as a float [0, 1].
         """
         if not self.is_trained:
             self.load()
@@ -391,31 +441,37 @@ class StockReturnPredictor:
                 index=df.index,
             )
 
-        prediction = self.automl.predict(df)
-        return float(prediction[0])
+        proba = self.automl.predict_proba(df)
+        if proba.ndim == 2:
+            return float(proba[0, 1])
+        return float(proba[0])
 
     def predict_ticker(self, ticker: str) -> dict:
-        """Predict 3-month return for a given ticker.
+        """Predict whether a ticker will achieve >=30% return in 3 months.
 
         Args:
             ticker: Stock ticker symbol.
 
         Returns:
-            Dict with ticker, predicted return, and confidence info.
+            Dict with ticker, probability, and classification.
         """
         row = build_training_row(ticker, include_sentiment=True)
         if row is None:
             return {
                 "ticker": ticker,
-                "predicted_return_3m": None,
+                "probability_30pct_gain": None,
+                "prediction": None,
                 "error": "Could not build features for ticker.",
             }
 
-        predicted_return = self.predict(row)
+        probability = self.predict(row)
+        prediction = 1 if probability >= 0.5 else 0
         return {
             "ticker": ticker,
-            "predicted_return_3m": round(predicted_return, 4),
-            "predicted_return_3m_pct": f"{predicted_return * 100:.2f}%",
+            "probability_30pct_gain": round(probability, 4),
+            "probability_pct": f"{probability * 100:.1f}%",
+            "prediction": prediction,
+            "signal": "BUY" if prediction == 1 else "HOLD",
         }
 
     def save(self) -> None:
