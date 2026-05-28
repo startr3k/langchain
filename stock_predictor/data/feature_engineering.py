@@ -126,7 +126,7 @@ ALL_FEATURE_NAMES = (
     + SEC_FEATURES
 )
 
-TARGET_COLUMN = "Forward_Return_3M"
+TARGET_COLUMN = "Forward_Max_Return_3M"
 
 
 def build_training_row(
@@ -250,8 +250,19 @@ def build_training_dataset(
 
             df = compute_technical_features(df)
 
-            # Compute 3-month forward return (~63 trading days)
-            df[TARGET_COLUMN] = df["Close"].shift(-63) / df["Close"] - 1
+            # Compute max forward return within 3-month window (~63 trading days).
+            # For each day, find the highest Close price in the next 63 days
+            # and compute the return from today's Close to that peak.
+            rolling_max = (
+                df["Close"]
+                .iloc[::-1]
+                .rolling(window=63, min_periods=1)
+                .max()
+                .iloc[::-1]
+            )
+            df[TARGET_COLUMN] = rolling_max / df["Close"] - 1
+            # NaN out the last 63 rows (incomplete forward window)
+            df.loc[df.index[-63:], TARGET_COLUMN] = np.nan
 
             # --- Fetch historical data sources for this ticker ---
             hist_fund = get_historical_fundamentals(ticker)

@@ -1,8 +1,8 @@
 """AutoML model for stock return classification using FLAML.
 
-Predicts whether a stock will achieve >=30% return over 3 months.
-FLAML (Fast Lightweight AutoML) automatically selects the best model
-and hyperparameters from XGBoost, LightGBM, etc.
+Predicts whether a stock will achieve >=30% peak return at any point
+within a 3-month window.  FLAML (Fast Lightweight AutoML) automatically
+selects the best model and hyperparameters from XGBoost, LightGBM, etc.
 """
 
 from __future__ import annotations
@@ -112,15 +112,16 @@ SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
 CLIP_BOUNDS_PATH = MODEL_DIR / "feature_clip_bounds.pkl"
 
 
-# Classification threshold: predict class 1 when Forward_Return_3M >= 30%
+# Classification threshold: predict class 1 when the stock achieves
+# >=30% peak return at any point within the 3-month forward window.
 CLASSIFICATION_THRESHOLD = 0.30
 
 
 class StockReturnPredictor:
     """AutoML-based stock return classifier.
 
-    Predicts class 1 (>=30% 3-month return) vs class 0 (otherwise).
-    Uses class weights to handle 6.4:1 imbalance and AUC as metric.
+    Predicts class 1 (>=30% peak return within 3 months) vs class 0.
+    Uses class weights to handle class imbalance and AUC as metric.
     """
 
     def __init__(self) -> None:
@@ -403,13 +404,13 @@ class StockReturnPredictor:
         return metrics
 
     def predict(self, features: dict | pd.DataFrame) -> float:
-        """Predict probability of >=30% 3-month return.
+        """Predict probability of >=30% peak return within 3 months.
 
         Args:
             features: Feature dict or DataFrame row.
 
         Returns:
-            Probability of class 1 (>=30% return) as a float [0, 1].
+            Probability of class 1 (>=30% peak return) as a float [0, 1].
         """
         if not self.is_trained:
             self.load()
@@ -447,7 +448,7 @@ class StockReturnPredictor:
         return float(proba[0])
 
     def predict_ticker(self, ticker: str) -> dict:
-        """Predict whether a ticker will achieve >=30% return in 3 months.
+        """Predict whether a ticker will hit >=30% peak return within 3 months.
 
         Args:
             ticker: Stock ticker symbol.

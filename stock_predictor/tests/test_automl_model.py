@@ -212,4 +212,4 @@ class TestFeatureEngineering:
         assert len(ALL_FEATURE_NAMES) == expected_total
 
     def test_target_column_defined(self):
-        assert TARGET_COLUMN == "Forward_Return_3M"
+        assert TARGET_COLUMN == "Forward_Max_Return_3M"
