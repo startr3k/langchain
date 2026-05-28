@@ -17,6 +17,7 @@ import pandas as pd
 from flaml import AutoML
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
 
 from stock_predictor.data.feature_engineering import (
     ALL_FEATURE_NAMES,
@@ -65,6 +66,7 @@ MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
+SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
 
 
 class StockReturnPredictor:
@@ -74,6 +76,7 @@ class StockReturnPredictor:
         self.automl = AutoML()
         self.feature_names: list[str] = []
         self.feature_medians: pd.Series | None = None
+        self.scaler: StandardScaler | None = None
         self.is_trained = False
 
     def train(
@@ -138,6 +141,19 @@ class StockReturnPredictor:
         y_train = y.iloc[:split_idx]
         X_test = X.iloc[split_idx + gap_rows:]
         y_test = y.iloc[split_idx + gap_rows:]
+
+        # Standardize features so no single feature dominates by scale
+        self.scaler = StandardScaler()
+        X_train = pd.DataFrame(
+            self.scaler.fit_transform(X_train),
+            columns=feature_cols,
+            index=X_train.index,
+        )
+        X_test = pd.DataFrame(
+            self.scaler.transform(X_test),
+            columns=feature_cols,
+            index=X_test.index,
+        )
 
         logger.info(
             "Training AutoML on %d samples (%d train / %d gap / %d test), "
@@ -228,6 +244,13 @@ class StockReturnPredictor:
         else:
             df = df.fillna(0.0)
 
+        if self.scaler is not None:
+            df = pd.DataFrame(
+                self.scaler.transform(df),
+                columns=self.feature_names,
+                index=df.index,
+            )
+
         prediction = self.automl.predict(df)
         return float(prediction[0])
 
@@ -261,6 +284,7 @@ class StockReturnPredictor:
         joblib.dump(self.automl, MODEL_PATH)
         joblib.dump(self.feature_names, FEATURE_NAMES_PATH)
         joblib.dump(self.feature_medians, MEDIANS_PATH)
+        joblib.dump(self.scaler, SCALER_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
     def load(self) -> None:
@@ -273,6 +297,8 @@ class StockReturnPredictor:
         self.feature_names = joblib.load(FEATURE_NAMES_PATH)
         if MEDIANS_PATH.exists():
             self.feature_medians = joblib.load(MEDIANS_PATH)
+        if SCALER_PATH.exists():
+            self.scaler = joblib.load(SCALER_PATH)
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 

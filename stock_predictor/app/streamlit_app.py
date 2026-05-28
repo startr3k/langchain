@@ -275,7 +275,7 @@ elif page == "Model Training":
     with col1:
         num_tickers = st.slider("Number of training tickers", 5, 50, 20)
     with col2:
-        time_budget = st.slider("AutoML time budget (seconds)", 30, 600, 120)
+        time_budget = st.slider("AutoML time budget (seconds)", 30, 600, 300)
 
     include_sentiment = st.checkbox("Include social media sentiment features", value=True)
 

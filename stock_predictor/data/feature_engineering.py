@@ -64,14 +64,12 @@ logger = logging.getLogger(__name__)
 
 TECHNICAL_FEATURES = [
     "Return_1d", "Return_5d", "Return_20d", "Return_60d",
-    "SMA_20", "SMA_50", "SMA_200",
-    "EMA_200",
+    # Normalized price-relative ratios (not raw dollar values)
     "Price_to_SMA_20", "Price_to_SMA_50", "Price_to_SMA_200",
     "Volatility_20d", "Volatility_60d",
     "Volume_Ratio", "Volume_Spike", "Volume_Spike_Magnitude",
     "RSI_14", "MACD", "MACD_Hist",
     "BB_Width", "BB_Position",
-    "OBV",
 ]
 
 # Current-snapshot fundamentals — EXCLUDED from model training/prediction
