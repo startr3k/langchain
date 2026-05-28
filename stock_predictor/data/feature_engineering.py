@@ -80,11 +80,11 @@ FUNDAMENTAL_FEATURES = [
     # Per-share data
     "trailingEps", "forwardEps", "bookValue", "revenuePerShare",
     # Profitability
-    "dividendYield", "profitMargins", "grossMargins",
+    "profitMargins", "grossMargins",
     "operatingMargins", "ebitdaMargins",
     "returnOnEquity", "returnOnAssets",
     # Growth
-    "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth",
+    "revenueGrowth",
     # Risk / leverage
     "beta", "debtToEquity", "currentRatio", "quickRatio",
     # Ownership / sentiment
