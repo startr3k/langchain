@@ -36,7 +36,7 @@ _predictor: StockReturnPredictor | None = None
 
 def _get_predictor() -> StockReturnPredictor:
     global _predictor
-    if _predictor is None:
+    if _predictor is None or not _predictor.is_trained:
         _predictor = StockReturnPredictor()
         try:
             _predictor.load()
@@ -106,8 +106,8 @@ def social_media_listener_tool(ticker: str) -> str:
         Detailed sentiment summary including polarity scores, mention counts,
         and bullish/bearish ratios from Reddit, Finviz news, and StockTwits.
     """
-    summary = get_sentiment_summary(ticker)
     features = get_sentiment_features(ticker)
+    summary = get_sentiment_summary(ticker, features=features)
 
     trending = get_trending_tickers_from_social()
     is_trending = ticker in trending

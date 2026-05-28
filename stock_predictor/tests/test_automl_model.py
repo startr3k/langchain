@@ -82,10 +82,14 @@ class TestStockReturnPredictor:
         prediction = predictor.predict(test_df)
         assert isinstance(prediction, float)
 
-    def test_predict_without_training_raises(self):
+    def test_predict_without_training_raises(self, tmp_path):
         predictor = StockReturnPredictor()
-        with pytest.raises(FileNotFoundError):
-            predictor.predict({"feature": 1.0})
+        with patch(
+            "stock_predictor.models.automl_model.MODEL_PATH",
+            tmp_path / "nonexistent_model.pkl",
+        ):
+            with pytest.raises(FileNotFoundError):
+                predictor.predict({"feature": 1.0})
 
     def test_save_and_load(self, tmp_path):
         predictor = StockReturnPredictor()
@@ -100,6 +104,9 @@ class TestStockReturnPredictor:
             "stock_predictor.models.automl_model.FEATURE_NAMES_PATH",
             tmp_path / "features.pkl",
         ), patch(
+            "stock_predictor.models.automl_model.MEDIANS_PATH",
+            tmp_path / "medians.pkl",
+        ), patch(
             "stock_predictor.models.automl_model.build_training_dataset",
             return_value=df,
         ):
@@ -110,6 +117,7 @@ class TestStockReturnPredictor:
             predictor2.load()
             assert predictor2.is_trained
             assert predictor2.feature_names == predictor.feature_names
+            assert predictor2.feature_medians is not None
 
     def test_predict_ticker(self):
         predictor = StockReturnPredictor()

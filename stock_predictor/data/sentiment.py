@@ -1,15 +1,14 @@
 """Social media sentiment analysis for stocks.
 
-Aggregates sentiment signals from Reddit (via PRAW) and other public sources
-to generate sentiment features for stock prediction.
+Aggregates sentiment signals from Reddit (via old.reddit.com scraping),
+Finviz news, and StockTwits to generate sentiment features for stock prediction.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
@@ -20,14 +19,28 @@ from textblob import TextBlob
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Reddit Sentiment (public JSON endpoint — no API key required)
+# Reddit Sentiment (old.reddit.com scraping — no API key required)
 # ---------------------------------------------------------------------------
 
-REDDIT_SEARCH_URL = "https://www.reddit.com/search.json"
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+]
+
 SUBREDDITS = [
     "wallstreetbets", "stocks", "investing", "StockMarket",
     "options", "pennystocks", "Daytrading", "ValueInvesting",
 ]
+
+_REQUEST_DELAY = 1.5  # seconds between requests to avoid rate limiting
+
+
+def _get_user_agent() -> str:
+    """Return a rotating user-agent string."""
+    import random
+    return random.choice(_USER_AGENTS)
 
 
 def _analyze_text_sentiment(text: str) -> dict:
@@ -39,6 +52,93 @@ def _analyze_text_sentiment(text: str) -> dict:
     }
 
 
+def _scrape_old_reddit_search(
+    subreddit: str,
+    query: str,
+    time_filter: str = "month",
+    limit: int = 25,
+) -> list[dict]:
+    """Scrape search results from old.reddit.com for a subreddit.
+
+    Args:
+        subreddit: Subreddit name.
+        query: Search query (ticker symbol).
+        time_filter: Time window ('day', 'week', 'month', 'year').
+        limit: Max posts to return.
+
+    Returns:
+        List of dicts with post data.
+    """
+    import time
+    from bs4 import BeautifulSoup
+
+    url = f"https://old.reddit.com/r/{subreddit}/search"
+    params = {
+        "q": query,
+        "restrict_sr": "on",
+        "sort": "relevance",
+        "t": time_filter,
+        "limit": str(limit),
+    }
+    headers = {"User-Agent": _get_user_agent()}
+    posts: list[dict] = []
+
+    try:
+        time.sleep(_REQUEST_DELAY)
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        if resp.status_code != 200:
+            logger.warning(
+                "old.reddit.com returned %d for r/%s query %s",
+                resp.status_code, subreddit, query,
+            )
+            return posts
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        things = soup.find_all("div", class_="thing", attrs={"data-fullname": True})
+
+        for thing in things[:limit]:
+            title_el = thing.find("a", class_="title")
+            title = title_el.get_text(strip=True) if title_el else ""
+
+            score_el = thing.find("div", class_="score unvoted")
+            score_text = score_el.get("title", "0") if score_el else "0"
+            try:
+                score = int(score_text)
+            except (ValueError, TypeError):
+                score = 0
+
+            comments_el = thing.find("a", class_="comments")
+            num_comments = 0
+            if comments_el:
+                comment_text = comments_el.get_text(strip=True)
+                nums = re.findall(r"\d+", comment_text)
+                if nums:
+                    num_comments = int(nums[0])
+
+            timestamp = thing.find("time")
+            created_utc = 0.0
+            if timestamp and timestamp.get("datetime"):
+                try:
+                    from datetime import timezone
+                    dt = datetime.fromisoformat(timestamp["datetime"].replace("Z", "+00:00"))
+                    created_utc = dt.replace(tzinfo=timezone.utc).timestamp()
+                except (ValueError, TypeError):
+                    pass
+
+            posts.append({
+                "source": "reddit",
+                "subreddit": subreddit,
+                "title": title,
+                "score": score,
+                "num_comments": num_comments,
+                "created_utc": created_utc,
+            })
+    except Exception:
+        logger.exception("Error scraping old.reddit.com for %s from r/%s", query, subreddit)
+
+    return posts
+
+
 def fetch_reddit_sentiment(
     ticker: str,
     limit: int = 100,
@@ -46,7 +146,7 @@ def fetch_reddit_sentiment(
 ) -> list[dict]:
     """Fetch Reddit posts mentioning a ticker and compute sentiment.
 
-    Uses Reddit's public JSON search endpoint (no API key needed).
+    Scrapes old.reddit.com search results (no API key required).
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL').
@@ -57,48 +157,16 @@ def fetch_reddit_sentiment(
         List of dicts with post-level sentiment data.
     """
     posts: list[dict] = []
-    headers = {"User-Agent": "StockPredictor/1.0"}
+    per_sub = max(1, limit // len(SUBREDDITS))
 
     for subreddit in SUBREDDITS:
-        url = f"https://www.reddit.com/r/{subreddit}/search.json"
-        params = {
-            "q": ticker,
-            "restrict_sr": "true",
-            "sort": "relevance",
-            "t": time_filter,
-            "limit": min(limit, 25),
-        }
-        try:
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
-            if resp.status_code != 200:
-                logger.warning(
-                    "Reddit returned %d for r/%s query %s",
-                    resp.status_code, subreddit, ticker,
-                )
-                continue
-            data = resp.json()
-            children = data.get("data", {}).get("children", [])
-            for child in children:
-                post = child.get("data", {})
-                title = post.get("title", "")
-                body = post.get("selftext", "")
-                text = f"{title}. {body}".strip()
-                sentiment = _analyze_text_sentiment(text)
-                posts.append(
-                    {
-                        "source": "reddit",
-                        "subreddit": subreddit,
-                        "title": title,
-                        "score": post.get("score", 0),
-                        "num_comments": post.get("num_comments", 0),
-                        "upvote_ratio": post.get("upvote_ratio", 0),
-                        "created_utc": post.get("created_utc", 0),
-                        "polarity": sentiment["polarity"],
-                        "subjectivity": sentiment["subjectivity"],
-                    }
-                )
-        except Exception:
-            logger.exception("Error fetching Reddit data for %s from r/%s", ticker, subreddit)
+        raw_posts = _scrape_old_reddit_search(subreddit, ticker, time_filter, per_sub)
+        for post in raw_posts:
+            sentiment = _analyze_text_sentiment(post["title"])
+            post["polarity"] = sentiment["polarity"]
+            post["subjectivity"] = sentiment["subjectivity"]
+            post["upvote_ratio"] = 0  # not available via scraping
+            posts.append(post)
 
     return posts
 
@@ -275,16 +343,19 @@ def get_sentiment_features(ticker: str) -> dict:
     return features
 
 
-def get_sentiment_summary(ticker: str) -> str:
+def get_sentiment_summary(ticker: str, features: dict | None = None) -> str:
     """Return a human-readable sentiment summary for a ticker.
 
     Args:
         ticker: Stock ticker symbol.
+        features: Pre-computed sentiment features dict. If ``None``,
+            calls :func:`get_sentiment_features` internally.
 
     Returns:
         Formatted string summarising social media sentiment.
     """
-    features = get_sentiment_features(ticker)
+    if features is None:
+        features = get_sentiment_features(ticker)
     polarity = features["sentiment_mean_polarity"]
     if polarity > 0.15:
         overall = "Strongly Positive"
@@ -318,10 +389,14 @@ def get_sentiment_summary(ticker: str) -> str:
 def get_trending_tickers_from_social() -> list[str]:
     """Identify trending tickers from Reddit's popular investing subreddits.
 
+    Scrapes hot posts from old.reddit.com (no API key required).
+
     Returns:
         List of ticker symbols mentioned most frequently.
     """
-    headers = {"User-Agent": "StockPredictor/1.0"}
+    import time
+    from bs4 import BeautifulSoup
+
     ticker_pattern = re.compile(r"\b[A-Z]{2,5}\b")
     mention_counts: dict[str, int] = {}
 
@@ -356,16 +431,24 @@ def get_trending_tickers_from_social() -> list[str]:
     )
 
     for subreddit in ["wallstreetbets", "stocks", "investing", "StockMarket"]:
-        url = f"https://www.reddit.com/r/{subreddit}/hot.json"
+        url = f"https://old.reddit.com/r/{subreddit}/hot"
+        headers = {"User-Agent": _get_user_agent()}
         try:
-            resp = requests.get(url, headers=headers, params={"limit": 50}, timeout=10)
+            time.sleep(_REQUEST_DELAY)
+            resp = requests.get(url, headers=headers, params={"limit": "50"}, timeout=15)
             if resp.status_code != 200:
+                logger.warning(
+                    "old.reddit.com returned %d for r/%s hot",
+                    resp.status_code, subreddit,
+                )
                 continue
-            data = resp.json()
-            for child in data.get("data", {}).get("children", []):
-                post = child.get("data", {})
-                text = f"{post.get('title', '')} {post.get('selftext', '')}"
-                matches = ticker_pattern.findall(text)
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            things = soup.find_all("div", class_="thing", attrs={"data-fullname": True})
+            for thing in things:
+                title_el = thing.find("a", class_="title")
+                title = title_el.get_text(strip=True) if title_el else ""
+                matches = ticker_pattern.findall(title)
                 for match in matches:
                     if match in common_words:
                         continue

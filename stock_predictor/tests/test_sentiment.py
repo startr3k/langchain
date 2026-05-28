@@ -42,26 +42,21 @@ class TestAnalyzeTextSentiment:
 
 
 class TestFetchRedditSentiment:
+    _REDDIT_HTML = """<html><body>
+    <div class="thing" data-fullname="t3_abc123">
+        <div class="score unvoted" title="100">100</div>
+        <a class="title" href="/r/wallstreetbets/test">NVDA is going to the moon!</a>
+        <a class="comments" href="/r/wallstreetbets/comments/abc123">50 comments</a>
+        <time datetime="2023-11-14T12:00:00+00:00">1 day ago</time>
+    </div>
+    </body></html>"""
+
+    @patch("stock_predictor.data.sentiment._REQUEST_DELAY", 0)
     @patch("stock_predictor.data.sentiment.requests.get")
     def test_parses_reddit_response(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "data": {
-                "children": [
-                    {
-                        "data": {
-                            "title": "NVDA is going to the moon!",
-                            "selftext": "Buy buy buy",
-                            "score": 100,
-                            "num_comments": 50,
-                            "upvote_ratio": 0.9,
-                            "created_utc": 1700000000,
-                        }
-                    }
-                ]
-            }
-        }
+        mock_response.text = self._REDDIT_HTML
         mock_get.return_value = mock_response
 
         posts = fetch_reddit_sentiment("NVDA", limit=5)
@@ -70,6 +65,7 @@ class TestFetchRedditSentiment:
         assert "polarity" in posts[0]
         assert "score" in posts[0]
 
+    @patch("stock_predictor.data.sentiment._REQUEST_DELAY", 0)
     @patch("stock_predictor.data.sentiment.requests.get")
     def test_handles_api_error(self, mock_get):
         mock_response = MagicMock()
@@ -79,6 +75,7 @@ class TestFetchRedditSentiment:
         posts = fetch_reddit_sentiment("AAPL")
         assert posts == []
 
+    @patch("stock_predictor.data.sentiment._REQUEST_DELAY", 0)
     @patch("stock_predictor.data.sentiment.requests.get")
     def test_handles_network_error(self, mock_get):
         mock_get.side_effect = Exception("Network error")
@@ -179,18 +176,20 @@ class TestGetSentimentSummary:
 
 
 class TestGetTrendingTickers:
+    @patch("stock_predictor.data.sentiment._REQUEST_DELAY", 0)
     @patch("stock_predictor.data.sentiment.requests.get")
     def test_returns_list(self, mock_get):
+        html = """<html><body>
+        <div class="thing" data-fullname="t3_1">
+            <a class="title" href="/test">NVDA to the moon!</a>
+        </div>
+        <div class="thing" data-fullname="t3_2">
+            <a class="title" href="/test">TSLA breaking out</a>
+        </div>
+        </body></html>"""
         mock_response = MagicMock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "data": {
-                "children": [
-                    {"data": {"title": "NVDA to the moon!", "selftext": ""}},
-                    {"data": {"title": "TSLA breaking out", "selftext": "TSLA calls"}},
-                ]
-            }
-        }
+        mock_response.text = html
         mock_get.return_value = mock_response
 
         tickers = get_trending_tickers_from_social()

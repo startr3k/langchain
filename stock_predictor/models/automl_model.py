@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
+MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
 
 
 class StockReturnPredictor:
@@ -38,6 +39,7 @@ class StockReturnPredictor:
     def __init__(self) -> None:
         self.automl = AutoML()
         self.feature_names: list[str] = []
+        self.feature_medians: pd.Series | None = None
         self.is_trained = False
 
     def train(
@@ -77,8 +79,9 @@ class StockReturnPredictor:
         X = X[valid]
         y = y[valid]
 
-        # Fill remaining NaN features with median
-        X = X.fillna(X.median())
+        # Fill remaining NaN features with median and save medians for prediction
+        self.feature_medians = X.median()
+        X = X.fillna(self.feature_medians)
 
         logger.info(
             "Training AutoML on %d samples, %d features (budget=%ds)",
@@ -132,7 +135,10 @@ class StockReturnPredictor:
             if col not in df.columns:
                 df[col] = 0.0
         df = df[self.feature_names]
-        df = df.fillna(0.0)
+        if self.feature_medians is not None:
+            df = df.fillna(self.feature_medians)
+        else:
+            df = df.fillna(0.0)
 
         prediction = self.automl.predict(df)
         return float(prediction[0])
@@ -166,6 +172,7 @@ class StockReturnPredictor:
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         joblib.dump(self.automl, MODEL_PATH)
         joblib.dump(self.feature_names, FEATURE_NAMES_PATH)
+        joblib.dump(self.feature_medians, MEDIANS_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
     def load(self) -> None:
@@ -176,6 +183,8 @@ class StockReturnPredictor:
             )
         self.automl = joblib.load(MODEL_PATH)
         self.feature_names = joblib.load(FEATURE_NAMES_PATH)
+        if MEDIANS_PATH.exists():
+            self.feature_medians = joblib.load(MEDIANS_PATH)
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 

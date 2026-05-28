@@ -166,5 +166,7 @@ def run_agent(
                 ToolMessage(content=str(result), tool_call_id=tool_call["id"])
             )
 
-    # If we hit max iterations, return the last AI message
+    # If we hit max iterations (or max_iterations=0), return the last AI message
+    if max_iterations <= 0:
+        return "Agent reached maximum iterations."
     return response.content if response.content else "Agent reached maximum iterations."
