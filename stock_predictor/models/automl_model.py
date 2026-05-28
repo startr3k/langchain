@@ -104,6 +104,40 @@ def _log_transform(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute interaction / derived features from existing columns.
+
+    These features combine multiple raw signals into higher-level
+    indicators that capture multi-factor breakout patterns.
+    """
+    # Earnings momentum: quarter-over-quarter EPS change
+    if "hist_earnings_growth_qoq" in df.columns:
+        df["Earnings_Momentum"] = df["hist_earnings_growth_qoq"]
+    else:
+        df["Earnings_Momentum"] = 0.0
+
+    # Fundamental surprise: companies beating estimates while growing
+    if "hist_revenue_growth_qoq" in df.columns and "earnings_surprise_pct" in df.columns:
+        df["Fundamental_Surprise"] = (
+            df["hist_revenue_growth_qoq"] * df["earnings_surprise_pct"]
+        )
+    else:
+        df["Fundamental_Surprise"] = 0.0
+
+    # Excess return vs market (stock alpha relative to S&P 500)
+    if "Return_20d" in df.columns and "sp500_return_20d" in df.columns:
+        df["Excess_Return_20d"] = df["Return_20d"] - df["sp500_return_20d"]
+    else:
+        df["Excess_Return_20d"] = 0.0
+
+    if "Return_60d" in df.columns and "sp500_return_60d" in df.columns:
+        df["Excess_Return_60d"] = df["Return_60d"] - df["sp500_return_60d"]
+    else:
+        df["Excess_Return_60d"] = 0.0
+
+    return df
+
+
 MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
@@ -157,6 +191,9 @@ class StockReturnPredictor:
 
         if df.empty:
             raise ValueError("Training dataset is empty — no valid data collected.")
+
+        # Compute derived interaction features before selecting columns
+        df = _compute_derived_features(df)
 
         # Prepare features and target
         feature_cols = [c for c in ALL_FEATURE_NAMES if c in df.columns]
@@ -419,6 +456,9 @@ class StockReturnPredictor:
             df = pd.DataFrame([features])
         else:
             df = features.copy()
+
+        # Compute derived interaction features
+        df = _compute_derived_features(df)
 
         # Ensure columns match training features
         for col in self.feature_names:

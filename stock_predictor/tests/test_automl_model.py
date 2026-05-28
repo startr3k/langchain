@@ -12,6 +12,7 @@ import pytest
 
 from stock_predictor.data.feature_engineering import (
     ALL_FEATURE_NAMES,
+    DERIVED_FEATURES,
     FUNDAMENTAL_FEATURES,
     SENTIMENT_FEATURES,
     TARGET_COLUMN,
@@ -208,6 +209,7 @@ class TestFeatureEngineering:
             + len(MACRO_FEATURES)
             + len(EARNINGS_FEATURES)
             + len(SEC_FEATURES)
+            + len(DERIVED_FEATURES)
         )
         assert len(ALL_FEATURE_NAMES) == expected_total
 

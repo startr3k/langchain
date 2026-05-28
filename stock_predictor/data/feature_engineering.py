@@ -69,9 +69,22 @@ TECHNICAL_FEATURES = [
     # SMA 200 cross signals
     "SMA_200_Cross", "Days_Since_SMA200_Cross",
     "Volatility_20d", "Volatility_60d",
+    # Breakout-engineered features
+    "Volatility_Contraction", "Momentum_Accel",
+    "Volume_Price_Confirm", "Dist_52w_High", "Dist_52w_Low",
+    "BB_Squeeze_Duration", "RSI_Divergence",
     "Volume_Ratio", "Volume_Spike", "Volume_Spike_Magnitude",
     "RSI_14", "MACD", "MACD_Hist",
     "BB_Width", "BB_Position",
+]
+
+# Interaction / derived features computed during training preprocessing.
+# These combine existing features to capture multi-factor signals.
+DERIVED_FEATURES = [
+    "Earnings_Momentum",       # change in EPS quarter-over-quarter
+    "Fundamental_Surprise",    # revenue growth × earnings surprise
+    "Excess_Return_20d",       # stock return minus market (S&P 500) return
+    "Excess_Return_60d",       # stock return minus market (S&P 500) return
 ]
 
 # Current-snapshot fundamentals — EXCLUDED from model training/prediction
@@ -124,6 +137,7 @@ ALL_FEATURE_NAMES = (
     + MACRO_FEATURES
     + EARNINGS_FEATURES
     + SEC_FEATURES
+    + DERIVED_FEATURES
 )
 
 TARGET_COLUMN = "Forward_Max_Return_3M"
