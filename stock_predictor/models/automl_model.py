@@ -15,6 +15,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from flaml import AutoML
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 
 from stock_predictor.data.feature_engineering import (
@@ -101,15 +102,35 @@ class StockReturnPredictor:
         )
 
         self.is_trained = True
+
+        # Compute evaluation metrics on training data
+        y_pred = self.automl.predict(X)
+        r2 = r2_score(y, y_pred)
+        mae = mean_absolute_error(y, y_pred)
+        rmse = float(np.sqrt(mean_squared_error(y, y_pred)))
+        # Mean Absolute Percentage Error (handle zeros)
+        nonzero_mask = y.abs() > 1e-8
+        if nonzero_mask.sum() > 0:
+            mape = float(((y[nonzero_mask] - y_pred[nonzero_mask]).abs() / y[nonzero_mask].abs()).mean() * 100)
+        else:
+            mape = float("nan")
+
         metrics = {
             "best_estimator": self.automl.best_estimator,
             "best_config": self.automl.best_config,
             "best_loss": self.automl.best_loss,
             "training_samples": len(X),
             "num_features": len(feature_cols),
+            "r2_score": round(r2, 4),
+            "mae": round(mae, 4),
+            "rmse": round(rmse, 4),
+            "mape": round(mape, 2),
         }
 
-        logger.info("Training complete. Best estimator: %s", self.automl.best_estimator)
+        logger.info(
+            "Training complete. Best: %s | R²=%.4f | MAE=%.4f | RMSE=%.4f",
+            self.automl.best_estimator, r2, mae, rmse,
+        )
         self.save()
         return metrics
 

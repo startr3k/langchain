@@ -8,6 +8,7 @@ import os
 import sys
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 # Ensure project root is on path
@@ -301,23 +302,8 @@ elif page == "Model Training":
                 progress_bar.progress(100)
                 status.success("Training complete!")
 
-                st.subheader("Training Results")
-                st.json(metrics)
-
-                # Feature importance
-                importance = predictor.get_feature_importance(top_n=15)
-                if importance:
-                    st.subheader("Top Feature Importances")
-                    import plotly.express as px
-                    import pandas as pd
-
-                    imp_df = pd.DataFrame(importance, columns=["Feature", "Importance"])
-                    fig = px.bar(
-                        imp_df, x="Importance", y="Feature",
-                        orientation="h", title="Feature Importance",
-                    )
-                    fig.update_layout(height=500)
-                    st.plotly_chart(fig, use_container_width=True)
+                st.session_state["training_metrics"] = metrics
+                st.session_state["trained_predictor"] = predictor
 
             except Exception as e:
                 progress_bar.progress(0)
@@ -386,18 +372,83 @@ elif page == "Model Training":
             type="primary",
         )
 
-    # Model status
-    st.markdown("---")
-    st.subheader("Model Status")
-    try:
-        predictor = StockReturnPredictor()
-        predictor.load()
-        st.success("Trained model found and loaded successfully.")
-        importance = predictor.get_feature_importance(top_n=10)
+    # ---- Model Evaluation Metrics ----
+    if "training_metrics" in st.session_state:
+        metrics = st.session_state["training_metrics"]
+        st.markdown("---")
+        st.subheader("Model Evaluation Metrics")
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            r2_val = metrics.get("r2_score", 0)
+            st.metric("R² Score", f"{r2_val:.4f}", help="Coefficient of determination (1.0 = perfect)")
+        with m2:
+            st.metric("MAE", f"{metrics.get('mae', 0):.4f}", help="Mean Absolute Error")
+        with m3:
+            st.metric("RMSE", f"{metrics.get('rmse', 0):.4f}", help="Root Mean Squared Error")
+        with m4:
+            st.metric("MAPE", f"{metrics.get('mape', 0):.1f}%", help="Mean Absolute Percentage Error")
+
+        m5, m6, m7 = st.columns(3)
+        with m5:
+            st.metric("Best Model", metrics.get("best_estimator", "N/A"))
+        with m6:
+            st.metric("Training Samples", metrics.get("training_samples", 0))
+        with m7:
+            st.metric("Features Used", metrics.get("num_features", 0))
+
+        with st.expander("Full Training Configuration"):
+            st.json(metrics)
+
+    # ---- Feature Importances ----
+    show_importance = False
+    predictor_for_importance = None
+    if "trained_predictor" in st.session_state:
+        predictor_for_importance = st.session_state["trained_predictor"]
+        show_importance = True
+    else:
+        try:
+            predictor_for_importance = StockReturnPredictor()
+            predictor_for_importance.load()
+            show_importance = True
+        except FileNotFoundError:
+            pass
+
+    if show_importance and predictor_for_importance is not None:
+        importance = predictor_for_importance.get_feature_importance(top_n=30)
         if importance:
-            st.write("Top features:", [f"{n} ({v:.3f})" for n, v in importance])
-    except FileNotFoundError:
-        st.warning("No trained model found. Train the model above.")
+            st.markdown("---")
+            st.subheader("Feature Importances")
+            import plotly.express as px
+
+            imp_df = pd.DataFrame(importance, columns=["Feature", "Importance"])
+            imp_df = imp_df.sort_values("Importance", ascending=True)
+            fig = px.bar(
+                imp_df, x="Importance", y="Feature",
+                orientation="h",
+                title="Top Feature Importances (Higher = More Predictive)",
+                color="Importance",
+                color_continuous_scale="Viridis",
+            )
+            fig.update_layout(
+                height=max(400, len(importance) * 22),
+                yaxis_title="",
+                xaxis_title="Importance Score",
+                coloraxis_showscale=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    # Model status (if no metrics in session)
+    if "training_metrics" not in st.session_state:
+        st.markdown("---")
+        st.subheader("Model Status")
+        try:
+            predictor = StockReturnPredictor()
+            predictor.load()
+            st.success("Trained model found and loaded successfully.")
+            st.info("Train a new model above to see detailed evaluation metrics (R², MAE, RMSE, MAPE).")
+        except FileNotFoundError:
+            st.warning("No trained model found. Train the model above.")
 
 
 # ---------------------------------------------------------------------------
@@ -430,8 +481,6 @@ elif page == "Batch Predictions":
             results.sort(key=lambda x: x["predicted_return_6m"], reverse=True)
 
             st.subheader(f"Results ({len(results)} stocks)")
-
-            import pandas as pd
 
             df = pd.DataFrame(results)
             df = df.rename(columns={

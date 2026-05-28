@@ -24,10 +24,11 @@ TECHNICAL_FEATURES = [
     "EMA_5", "EMA_10", "EMA_20", "EMA_50", "EMA_200",
     "Price_to_SMA_20", "Price_to_SMA_50", "Price_to_SMA_200",
     "Volatility_20d", "Volatility_60d",
-    "Volume_Ratio",
+    "Volume_Ratio", "Volume_Spike", "Volume_Spike_Magnitude",
     "RSI_14", "MACD", "MACD_Signal", "MACD_Hist",
     "BB_Width", "BB_Position",
     "ATR_14",
+    "OBV", "OBV_SMA_20",
 ]
 
 FUNDAMENTAL_FEATURES = [
@@ -141,9 +142,9 @@ def build_training_dataset(
             if valid_df.empty:
                 continue
 
-            # Sample up to 50 data points per ticker to keep dataset balanced
+            # Sample up to 200 data points per ticker to leverage 5yr of data
             sample_indices = np.linspace(
-                0, len(valid_df) - 1, min(50, len(valid_df)), dtype=int
+                0, len(valid_df) - 1, min(200, len(valid_df)), dtype=int
             )
             sampled = valid_df.iloc[sample_indices]
 

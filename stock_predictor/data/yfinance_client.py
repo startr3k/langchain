@@ -125,6 +125,14 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["OBV"] = obv
     df["OBV_SMA_20"] = obv.rolling(window=20).mean()
 
+    # Volume spike detection
+    vol_mean = df["Volume"].rolling(window=20).mean()
+    vol_std = df["Volume"].rolling(window=20).std()
+    df["Volume_Spike"] = (df["Volume"] > vol_mean * 1.5).astype(float)
+    df["Volume_Spike_Magnitude"] = (
+        (df["Volume"] - vol_mean) / vol_std.replace(0, np.nan)
+    )
+
     return df
 
 
