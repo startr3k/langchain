@@ -56,17 +56,8 @@ class TestEndToEndPipeline:
             "sentiment_min_polarity": -0.1,
             "sentiment_mean_subjectivity": 0.5,
             "sentiment_total_mentions": 20,
-            "reddit_mention_count": 10,
-            "reddit_mean_polarity": 0.15,
-            "reddit_mean_score": 50.0,
-            "reddit_total_comments": 200.0,
             "finviz_mention_count": 5,
             "finviz_mean_polarity": 0.3,
-            "stocktwits_mention_count": 5,
-            "stocktwits_mean_polarity": 0.1,
-            "stocktwits_bullish_count": 3,
-            "stocktwits_bearish_count": 1,
-            "stocktwits_bull_bear_ratio": 3.0,
         }
 
         row = build_training_row("AAPL", include_sentiment=True)
@@ -79,7 +70,7 @@ class TestEndToEndPipeline:
 
         # Check sentiment features
         assert row["sentiment_mean_polarity"] == 0.2
-        assert row["reddit_mention_count"] == 10
+        assert row["finviz_mention_count"] == 5
 
     @patch("stock_predictor.data.feature_engineering.get_sentiment_features")
     @patch("stock_predictor.data.feature_engineering.get_fundamentals_features")

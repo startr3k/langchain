@@ -96,15 +96,12 @@ FUNDAMENTAL_FEATURES = [
 ]
 
 SENTIMENT_FEATURES = [
+    # Aggregated sentiment (derived from available sources)
     "sentiment_mean_polarity", "sentiment_std_polarity",
     "sentiment_max_polarity", "sentiment_min_polarity",
     "sentiment_mean_subjectivity", "sentiment_total_mentions",
-    "reddit_mention_count", "reddit_mean_polarity",
-    "reddit_mean_score", "reddit_total_comments",
+    # Finviz news headlines (reliable from cloud environments)
     "finviz_mention_count", "finviz_mean_polarity",
-    "stocktwits_mention_count", "stocktwits_mean_polarity",
-    "stocktwits_bullish_count", "stocktwits_bearish_count",
-    "stocktwits_bull_bear_ratio",
 ]
 
 # All features used by the model (training + prediction).
