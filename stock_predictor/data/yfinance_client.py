@@ -155,6 +155,21 @@ def get_stock_info(ticker: str) -> dict:
         "returnOnEquity", "debtToEquity", "currentRatio",
         "freeCashflow", "totalRevenue", "targetMeanPrice",
         "recommendationKey", "numberOfAnalystOpinions",
+        # Valuation metrics
+        "pegRatio", "priceToSalesTrailing12Months",
+        "enterpriseToEbitda", "enterpriseToRevenue",
+        "enterpriseValue", "bookValue",
+        "trailingEps", "forwardEps",
+        # Profitability / efficiency
+        "returnOnAssets", "grossMargins", "operatingMargins",
+        "ebitdaMargins",
+        # Liquidity / leverage
+        "quickRatio", "totalDebt", "totalCash",
+        # Ownership / short interest
+        "shortRatio", "shortPercentOfFloat",
+        "heldPercentInsiders", "heldPercentInstitutions",
+        # Growth
+        "revenuePerShare", "earningsQuarterlyGrowth",
     ]
     return {k: info.get(k) for k in keys_of_interest if info.get(k) is not None}
 
@@ -170,10 +185,24 @@ def get_fundamentals_features(ticker: str) -> dict:
     """
     info = get_stock_info(ticker)
     feature_keys = [
+        # Valuation ratios
         "marketCap", "trailingPE", "forwardPE", "priceToBook",
-        "dividendYield", "beta", "revenueGrowth", "earningsGrowth",
-        "profitMargins", "returnOnEquity", "debtToEquity",
-        "currentRatio", "numberOfAnalystOpinions",
+        "pegRatio", "priceToSalesTrailing12Months",
+        "enterpriseToEbitda", "enterpriseToRevenue",
+        # Per-share data
+        "trailingEps", "forwardEps", "bookValue", "revenuePerShare",
+        # Profitability
+        "dividendYield", "profitMargins", "grossMargins",
+        "operatingMargins", "ebitdaMargins",
+        "returnOnEquity", "returnOnAssets",
+        # Growth
+        "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth",
+        # Risk / leverage
+        "beta", "debtToEquity", "currentRatio", "quickRatio",
+        # Ownership / sentiment
+        "shortRatio", "shortPercentOfFloat",
+        "heldPercentInsiders", "heldPercentInstitutions",
+        "numberOfAnalystOpinions",
     ]
     features = {}
     for k in feature_keys:
@@ -183,7 +212,48 @@ def get_fundamentals_features(ticker: str) -> dict:
                 features[k] = float(val)
             except (ValueError, TypeError):
                 pass
+
+    # Days until next earnings
+    features["daysToEarnings"] = _get_days_to_earnings(ticker)
+
     return features
+
+
+def _get_days_to_earnings(ticker: str) -> float:
+    """Return calendar days until the next quarterly earnings date.
+
+    Returns NaN if the date cannot be determined.
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        cal = stock.calendar
+        if cal is None or cal.empty if isinstance(cal, pd.DataFrame) else not cal:
+            return float("nan")
+
+        # calendar can be a dict or DataFrame depending on yfinance version
+        if isinstance(cal, pd.DataFrame):
+            if "Earnings Date" in cal.index:
+                earnings_date = pd.Timestamp(cal.loc["Earnings Date"].iloc[0])
+            else:
+                return float("nan")
+        elif isinstance(cal, dict):
+            ed = cal.get("Earnings Date") or cal.get("earningsDate")
+            if ed is None:
+                return float("nan")
+            if isinstance(ed, list):
+                ed = ed[0] if ed else None
+            if ed is None:
+                return float("nan")
+            earnings_date = pd.Timestamp(ed)
+        else:
+            return float("nan")
+
+        today = pd.Timestamp.now().normalize()
+        delta = (earnings_date - today).days
+        return float(max(delta, 0))
+    except Exception:
+        logger.debug("Could not fetch earnings date for %s", ticker)
+        return float("nan")
 
 
 def get_nasdaq_trending_tickers(top_n: int = 20) -> list[str]:

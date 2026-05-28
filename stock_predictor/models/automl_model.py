@@ -84,14 +84,33 @@ class StockReturnPredictor:
         self.feature_medians = X.median()
         X = X.fillna(self.feature_medians)
 
+        # --- Temporal train/test split to avoid data leakage ---
+        # Sort by date so split is chronological, not random
+        if "_date" in df.columns:
+            date_series = pd.to_datetime(df["_date"], errors="coerce")
+            sort_order = date_series.sort_values().index
+            X = X.loc[sort_order]
+            y = y.loc[sort_order]
+
+        # Hold out the last 20% as a test set with a 63-day gap
+        # (gap prevents overlapping forward-return windows from leaking)
+        gap_rows = max(1, int(len(X) * 0.05))  # ~5% gap
+        split_idx = int(len(X) * 0.75)
+        X_train = X.iloc[:split_idx]
+        y_train = y.iloc[:split_idx]
+        X_test = X.iloc[split_idx + gap_rows:]
+        y_test = y.iloc[split_idx + gap_rows:]
+
         logger.info(
-            "Training AutoML on %d samples, %d features (budget=%ds)",
-            len(X), len(feature_cols), time_budget,
+            "Training AutoML on %d samples (%d train / %d gap / %d test), "
+            "%d features (budget=%ds)",
+            len(X), len(X_train), gap_rows, len(X_test),
+            len(feature_cols), time_budget,
         )
 
         self.automl.fit(
-            X_train=X,
-            y_train=y,
+            X_train=X_train,
+            y_train=y_train,
             task="regression",
             time_budget=time_budget,
             metric="r2",
@@ -103,33 +122,42 @@ class StockReturnPredictor:
 
         self.is_trained = True
 
-        # Compute evaluation metrics on training data
-        y_pred = self.automl.predict(X)
-        r2 = r2_score(y, y_pred)
-        mae = mean_absolute_error(y, y_pred)
-        rmse = float(np.sqrt(mean_squared_error(y, y_pred)))
-        # Mean Absolute Percentage Error (handle zeros)
-        nonzero_mask = y.abs() > 1e-8
+        # --- Out-of-sample metrics on held-out test set ---
+        y_pred_test = self.automl.predict(X_test)
+        r2 = r2_score(y_test, y_pred_test)
+        mae = mean_absolute_error(y_test, y_pred_test)
+        rmse = float(np.sqrt(mean_squared_error(y_test, y_pred_test)))
+        nonzero_mask = y_test.abs() > 1e-8
         if nonzero_mask.sum() > 0:
-            mape = float(((y[nonzero_mask] - y_pred[nonzero_mask]).abs() / y[nonzero_mask].abs()).mean() * 100)
+            mape = float(
+                ((y_test[nonzero_mask] - y_pred_test[nonzero_mask]).abs()
+                 / y_test[nonzero_mask].abs()).mean() * 100
+            )
         else:
             mape = float("nan")
+
+        # Training-set metrics for comparison (to detect overfitting)
+        y_pred_train = self.automl.predict(X_train)
+        r2_train = r2_score(y_train, y_pred_train)
 
         metrics = {
             "best_estimator": self.automl.best_estimator,
             "best_config": self.automl.best_config,
             "best_loss": self.automl.best_loss,
-            "training_samples": len(X),
+            "training_samples": len(X_train),
+            "test_samples": len(X_test),
             "num_features": len(feature_cols),
             "r2_score": round(r2, 4),
+            "r2_train": round(r2_train, 4),
             "mae": round(mae, 4),
             "rmse": round(rmse, 4),
             "mape": round(mape, 2),
         }
 
         logger.info(
-            "Training complete. Best: %s | R²=%.4f | MAE=%.4f | RMSE=%.4f",
-            self.automl.best_estimator, r2, mae, rmse,
+            "Training complete. Best: %s | Test R²=%.4f | Train R²=%.4f | "
+            "MAE=%.4f | RMSE=%.4f",
+            self.automl.best_estimator, r2, r2_train, mae, rmse,
         )
         self.save()
         return metrics

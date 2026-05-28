@@ -17,6 +17,11 @@ from stock_predictor.data.feature_engineering import (
     TARGET_COLUMN,
     TECHNICAL_FEATURES,
 )
+from stock_predictor.data.historical_fundamentals import HIST_FUNDAMENTAL_FEATURES
+from stock_predictor.data.macro_data import MACRO_FEATURES
+from stock_predictor.data.earnings_data import EARNINGS_FEATURES
+from stock_predictor.data.google_trends import TRENDS_FEATURES
+from stock_predictor.data.sec_edgar import SEC_FEATURES
 from stock_predictor.models.automl_model import StockReturnPredictor
 
 
@@ -189,9 +194,22 @@ class TestFeatureEngineering:
         assert len(TECHNICAL_FEATURES) > 10
         assert len(FUNDAMENTAL_FEATURES) > 5
         assert len(SENTIMENT_FEATURES) > 5
-        assert len(ALL_FEATURE_NAMES) == (
-            len(TECHNICAL_FEATURES) + len(FUNDAMENTAL_FEATURES) + len(SENTIMENT_FEATURES)
+        assert len(HIST_FUNDAMENTAL_FEATURES) > 5
+        assert len(MACRO_FEATURES) > 5
+        assert len(EARNINGS_FEATURES) > 0
+        assert len(TRENDS_FEATURES) > 0
+        assert len(SEC_FEATURES) > 0
+        expected_total = (
+            len(TECHNICAL_FEATURES)
+            + len(FUNDAMENTAL_FEATURES)
+            + len(HIST_FUNDAMENTAL_FEATURES)
+            + len(MACRO_FEATURES)
+            + len(EARNINGS_FEATURES)
+            + len(TRENDS_FEATURES)
+            + len(SEC_FEATURES)
+            + len(SENTIMENT_FEATURES)
         )
+        assert len(ALL_FEATURE_NAMES) == expected_total
 
     def test_target_column_defined(self):
         assert TARGET_COLUMN == "Forward_Return_3M"

@@ -381,21 +381,32 @@ elif page == "Model Training":
         m1, m2, m3, m4 = st.columns(4)
         with m1:
             r2_val = metrics.get("r2_score", 0)
-            st.metric("R² Score", f"{r2_val:.4f}", help="Coefficient of determination (1.0 = perfect)")
+            st.metric(
+                "R² Score (Test)",
+                f"{r2_val:.4f}",
+                help="Out-of-sample coefficient of determination (1.0 = perfect)",
+            )
         with m2:
-            st.metric("MAE", f"{metrics.get('mae', 0):.4f}", help="Mean Absolute Error")
+            st.metric("MAE (Test)", f"{metrics.get('mae', 0):.4f}", help="Mean Absolute Error on held-out test set")
         with m3:
-            st.metric("RMSE", f"{metrics.get('rmse', 0):.4f}", help="Root Mean Squared Error")
+            st.metric("RMSE (Test)", f"{metrics.get('rmse', 0):.4f}", help="Root Mean Squared Error on held-out test set")
         with m4:
-            st.metric("MAPE", f"{metrics.get('mape', 0):.1f}%", help="Mean Absolute Percentage Error")
+            st.metric("MAPE (Test)", f"{metrics.get('mape', 0):.1f}%", help="Mean Absolute Percentage Error on held-out test set")
 
-        m5, m6, m7 = st.columns(3)
+        m5, m6, m7, m8 = st.columns(4)
         with m5:
             st.metric("Best Model", metrics.get("best_estimator", "N/A"))
         with m6:
             st.metric("Training Samples", metrics.get("training_samples", 0))
         with m7:
-            st.metric("Features Used", metrics.get("num_features", 0))
+            st.metric("Test Samples", metrics.get("test_samples", 0))
+        with m8:
+            r2_train = metrics.get("r2_train", 0)
+            st.metric(
+                "R² (Train)",
+                f"{r2_train:.4f}",
+                help="Training set R² — compare with Test R² to detect overfitting",
+            )
 
         with st.expander("Full Training Configuration"):
             st.json(metrics)

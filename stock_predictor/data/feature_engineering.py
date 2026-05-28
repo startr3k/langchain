@@ -1,4 +1,18 @@
-"""Feature engineering pipeline that combines YFinance and sentiment data."""
+"""Feature engineering pipeline that combines all data sources.
+
+All historical features are time-aligned — each training row only sees
+data that was available at that point in time, eliminating look-ahead bias.
+
+Data sources:
+1. Technical indicators (from price/volume — inherently time-correct)
+2. Historical quarterly fundamentals (YFinance quarterly filings)
+3. Current-snapshot fundamentals (used only for live prediction, NOT training)
+4. Macroeconomic data (VIX, rates, S&P500 — properly time-indexed)
+5. Earnings surprise history (YFinance earnings_dates)
+6. Google Trends (historical search interest)
+7. SEC EDGAR XBRL (historical regulatory filings)
+8. Sentiment (current snapshot — used for both training and prediction)
+"""
 
 from __future__ import annotations
 
@@ -8,6 +22,31 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from stock_predictor.data.earnings_data import (
+    EARNINGS_FEATURES,
+    align_earnings_to_dates,
+    get_earnings_history,
+)
+from stock_predictor.data.google_trends import (
+    TRENDS_FEATURES,
+    align_trends_to_dates,
+    get_google_trends,
+)
+from stock_predictor.data.historical_fundamentals import (
+    HIST_FUNDAMENTAL_FEATURES,
+    align_fundamentals_to_dates,
+    get_historical_fundamentals,
+)
+from stock_predictor.data.macro_data import (
+    MACRO_FEATURES,
+    align_macro_to_dates,
+    get_macro_data,
+)
+from stock_predictor.data.sec_edgar import (
+    SEC_FEATURES,
+    align_sec_to_dates,
+    get_sec_filings,
+)
 from stock_predictor.data.sentiment import get_sentiment_features
 from stock_predictor.data.yfinance_client import (
     compute_technical_features,
@@ -17,7 +56,8 @@ from stock_predictor.data.yfinance_client import (
 
 logger = logging.getLogger(__name__)
 
-# Technical feature columns produced by compute_technical_features
+# ---- Feature group definitions ----
+
 TECHNICAL_FEATURES = [
     "Return_1d", "Return_5d", "Return_20d", "Return_60d",
     "SMA_5", "SMA_10", "SMA_20", "SMA_50", "SMA_200",
@@ -31,11 +71,28 @@ TECHNICAL_FEATURES = [
     "OBV", "OBV_SMA_20",
 ]
 
+# Current-snapshot fundamentals (used for live prediction only)
 FUNDAMENTAL_FEATURES = [
+    # Valuation ratios
     "marketCap", "trailingPE", "forwardPE", "priceToBook",
-    "dividendYield", "beta", "revenueGrowth", "earningsGrowth",
-    "profitMargins", "returnOnEquity", "debtToEquity",
-    "currentRatio", "numberOfAnalystOpinions",
+    "pegRatio", "priceToSalesTrailing12Months",
+    "enterpriseToEbitda", "enterpriseToRevenue",
+    # Per-share data
+    "trailingEps", "forwardEps", "bookValue", "revenuePerShare",
+    # Profitability
+    "dividendYield", "profitMargins", "grossMargins",
+    "operatingMargins", "ebitdaMargins",
+    "returnOnEquity", "returnOnAssets",
+    # Growth
+    "revenueGrowth", "earningsGrowth", "earningsQuarterlyGrowth",
+    # Risk / leverage
+    "beta", "debtToEquity", "currentRatio", "quickRatio",
+    # Ownership / sentiment
+    "shortRatio", "shortPercentOfFloat",
+    "heldPercentInsiders", "heldPercentInstitutions",
+    "numberOfAnalystOpinions",
+    # Earnings calendar
+    "daysToEarnings",
 ]
 
 SENTIMENT_FEATURES = [
@@ -50,7 +107,17 @@ SENTIMENT_FEATURES = [
     "stocktwits_bull_bear_ratio",
 ]
 
-ALL_FEATURE_NAMES = TECHNICAL_FEATURES + FUNDAMENTAL_FEATURES + SENTIMENT_FEATURES
+# All features used by the model (training + prediction)
+ALL_FEATURE_NAMES = (
+    TECHNICAL_FEATURES
+    + FUNDAMENTAL_FEATURES
+    + HIST_FUNDAMENTAL_FEATURES
+    + MACRO_FEATURES
+    + EARNINGS_FEATURES
+    + TRENDS_FEATURES
+    + SEC_FEATURES
+    + SENTIMENT_FEATURES
+)
 
 TARGET_COLUMN = "Forward_Return_3M"
 
@@ -60,6 +127,9 @@ def build_training_row(
     include_sentiment: bool = True,
 ) -> dict | None:
     """Build a single feature row (latest data point) for a ticker.
+
+    Used for live prediction — includes current-snapshot fundamentals
+    plus the latest historical data.
 
     Args:
         ticker: Stock ticker symbol.
@@ -80,10 +150,47 @@ def build_training_row(
         for col in TECHNICAL_FEATURES:
             row[col] = latest.get(col, np.nan)
 
-        # Fundamentals
+        # Current-snapshot fundamentals (acceptable for live prediction)
         fundamentals = get_fundamentals_features(ticker)
         for col in FUNDAMENTAL_FEATURES:
             row[col] = fundamentals.get(col, np.nan)
+
+        # Historical fundamentals (latest quarter)
+        hist_fund = get_historical_fundamentals(ticker)
+        if not hist_fund.empty:
+            latest_q = hist_fund.iloc[-1]
+            for col in HIST_FUNDAMENTAL_FEATURES:
+                row[col] = latest_q.get(col, np.nan)
+
+        # Macro data (latest available)
+        macro = get_macro_data(period="1y")
+        if not macro.empty:
+            latest_macro = macro.iloc[-1]
+            for col in MACRO_FEATURES:
+                row[col] = latest_macro.get(col, np.nan)
+
+        # Earnings data
+        earnings = get_earnings_history(ticker)
+        if not earnings.empty:
+            today = pd.Timestamp.now().normalize()
+            aligned = align_earnings_to_dates(earnings, [today])
+            for col in EARNINGS_FEATURES:
+                row[col] = aligned[col].iloc[0] if col in aligned.columns else np.nan
+
+        # Google Trends (latest week)
+        trends = get_google_trends(ticker, timeframe="today 3-m")
+        if not trends.empty:
+            latest_t = trends.iloc[-1]
+            for col in TRENDS_FEATURES:
+                row[col] = latest_t.get(col, np.nan)
+
+        # SEC EDGAR (latest filing)
+        sec = get_sec_filings(ticker)
+        if not sec.empty:
+            today = pd.Timestamp.now().normalize()
+            aligned = align_sec_to_dates(sec, [today])
+            for col in SEC_FEATURES:
+                row[col] = aligned[col].iloc[0] if col in aligned.columns else np.nan
 
         # Sentiment
         if include_sentiment:
@@ -101,10 +208,18 @@ def build_training_dataset(
     tickers: list[str],
     include_sentiment: bool = True,
 ) -> pd.DataFrame:
-    """Build a training dataset across multiple tickers.
+    """Build a training dataset with properly time-aligned features.
 
-    For training, we use historical data points. The target is the actual
-    3-month forward return computed from historical prices.
+    For training, each row gets ONLY the data that was available at
+    that point in time:
+    - Technical indicators: computed from historical price/volume (correct)
+    - Historical fundamentals: aligned to the most recent quarterly filing
+    - Macroeconomic data: aligned to the most recent available date
+    - Earnings surprise: aligned to the most recent reported earnings
+    - Google Trends: aligned to the most recent weekly data
+    - SEC EDGAR: aligned to the most recent filing date
+    - Current-snapshot fundamentals: applied uniformly (documented limitation)
+    - Sentiment: current snapshot (documented limitation)
 
     Args:
         tickers: List of ticker symbols.
@@ -113,6 +228,10 @@ def build_training_dataset(
     Returns:
         DataFrame ready for model training.
     """
+    # Fetch macro data once (shared across all tickers)
+    logger.info("Fetching macroeconomic data...")
+    macro_df = get_macro_data(period="6y")
+
     all_rows: list[dict] = []
 
     for ticker in tickers:
@@ -127,37 +246,101 @@ def build_training_dataset(
             # Compute 3-month forward return (~63 trading days)
             df[TARGET_COLUMN] = df["Close"].shift(-63) / df["Close"] - 1
 
-            # Fundamentals (static, applied to all rows)
+            # --- Fetch historical data sources for this ticker ---
+            hist_fund = get_historical_fundamentals(ticker)
+            earnings_df = get_earnings_history(ticker)
+            trends_df = get_google_trends(ticker)
+            sec_df = get_sec_filings(ticker)
+
+            # Current-snapshot fundamentals (documented limitation)
             fundamentals = get_fundamentals_features(ticker)
 
-            # Sentiment (current snapshot, applied to all rows as proxy)
-            sentiment = {}
+            # Sentiment (current snapshot — documented limitation)
+            sentiment: dict = {}
             if include_sentiment:
                 sentiment = get_sentiment_features(ticker)
 
-            # Sample rows that have valid target and enough history
+            # Filter valid rows
             valid_mask = df[TARGET_COLUMN].notna() & df["SMA_200"].notna()
             valid_df = df[valid_mask]
 
             if valid_df.empty:
                 continue
 
-            # Sample up to 200 data points per ticker to leverage 5yr of data
+            # Sample up to 200 data points per ticker
             sample_indices = np.linspace(
                 0, len(valid_df) - 1, min(200, len(valid_df)), dtype=int
             )
             sampled = valid_df.iloc[sample_indices]
+            sample_dates = sampled.index
 
-            for _, row in sampled.iterrows():
+            # --- Time-align historical features to each sample date ---
+            aligned_hist_fund = align_fundamentals_to_dates(hist_fund, sample_dates)
+            aligned_earnings = align_earnings_to_dates(earnings_df, sample_dates)
+            aligned_trends = align_trends_to_dates(trends_df, sample_dates)
+            aligned_sec = align_sec_to_dates(sec_df, sample_dates)
+            aligned_macro = align_macro_to_dates(macro_df, sample_dates)
+
+            for i, (idx, row) in enumerate(sampled.iterrows()):
                 data_point: dict = {"Ticker": ticker}
+                data_point["_date"] = idx if isinstance(idx, str) else str(idx)
+
+                # Technical features (inherently time-correct)
                 for col in TECHNICAL_FEATURES:
                     data_point[col] = row.get(col, np.nan)
+
+                # Current-snapshot fundamentals (limitation documented)
                 for col in FUNDAMENTAL_FEATURES:
                     data_point[col] = fundamentals.get(col, np.nan)
+
+                # Historical fundamentals (time-aligned, no leakage)
+                for col in HIST_FUNDAMENTAL_FEATURES:
+                    data_point[col] = (
+                        aligned_hist_fund[col].iloc[i]
+                        if col in aligned_hist_fund.columns
+                        else np.nan
+                    )
+
+                # Macroeconomic data (time-aligned, no leakage)
+                for col in MACRO_FEATURES:
+                    data_point[col] = (
+                        aligned_macro[col].iloc[i]
+                        if col in aligned_macro.columns
+                        else np.nan
+                    )
+
+                # Earnings data (time-aligned, no leakage)
+                for col in EARNINGS_FEATURES:
+                    data_point[col] = (
+                        aligned_earnings[col].iloc[i]
+                        if col in aligned_earnings.columns
+                        else np.nan
+                    )
+
+                # Google Trends (time-aligned, no leakage)
+                for col in TRENDS_FEATURES:
+                    data_point[col] = (
+                        aligned_trends[col].iloc[i]
+                        if col in aligned_trends.columns
+                        else np.nan
+                    )
+
+                # SEC EDGAR (time-aligned, no leakage)
+                for col in SEC_FEATURES:
+                    data_point[col] = (
+                        aligned_sec[col].iloc[i]
+                        if col in aligned_sec.columns
+                        else np.nan
+                    )
+
+                # Sentiment (current snapshot — documented limitation)
                 for col in SENTIMENT_FEATURES:
                     data_point[col] = sentiment.get(col, 0.0)
+
                 data_point[TARGET_COLUMN] = row[TARGET_COLUMN]
                 all_rows.append(data_point)
+
+            logger.info("Processed %s: %d samples", ticker, len(sampled))
 
         except Exception:
             logger.exception("Error processing %s for training", ticker)
