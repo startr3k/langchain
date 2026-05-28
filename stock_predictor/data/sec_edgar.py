@@ -105,17 +105,22 @@ def get_sec_filings(ticker: str) -> pd.DataFrame:
                             values[end] = float(val)
             return values
 
-        revenue = (
-            _extract_quarterly("Revenues")
-            or _extract_quarterly("RevenueFromContractWithCustomerExcludingAssessedTax")
-            or _extract_quarterly("SalesRevenueNet")
-        )
+        # Pick the revenue concept with the most filing entries
+        rev_candidates = [
+            _extract_quarterly("RevenueFromContractWithCustomerExcludingAssessedTax"),
+            _extract_quarterly("SalesRevenueNet"),
+            _extract_quarterly("Revenues"),
+        ]
+        revenue = max(rev_candidates, key=len) if any(rev_candidates) else {}
         net_income = _extract_quarterly("NetIncomeLoss")
         eps = _extract_quarterly("EarningsPerShareDiluted")
         total_assets = _extract_quarterly("Assets")
         total_liab = _extract_quarterly("Liabilities")
         equity = _extract_quarterly("StockholdersEquity")
-        op_cf = _extract_quarterly("NetCashProvidedByOperatingActivities")
+        op_cf = (
+            _extract_quarterly("NetCashProvidedByUsedInOperatingActivities")
+            or _extract_quarterly("NetCashProvidedByOperatingActivities")
+        )
 
         # Combine all dates
         all_dates = sorted(set(

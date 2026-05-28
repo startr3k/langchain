@@ -107,14 +107,16 @@ SENTIMENT_FEATURES = [
     "stocktwits_bull_bear_ratio",
 ]
 
-# All features used by the model (training + prediction)
+# All features used by the model (training + prediction).
+# Google Trends features are excluded from the default list because
+# Google aggressively rate-limits cloud/datacenter IPs; they are
+# added dynamically when data is actually available.
 ALL_FEATURE_NAMES = (
     TECHNICAL_FEATURES
     + FUNDAMENTAL_FEATURES
     + HIST_FUNDAMENTAL_FEATURES
     + MACRO_FEATURES
     + EARNINGS_FEATURES
-    + TRENDS_FEATURES
     + SEC_FEATURES
     + SENTIMENT_FEATURES
 )
@@ -236,8 +238,12 @@ def build_training_dataset(
 
     for ticker in tickers:
         try:
-            df = get_stock_data(ticker, period="5y")
-            if df.empty or len(df) < 300:
+            # 3y window ensures all historical data sources have coverage
+            # (YFinance quarterly financials only go back ~5 quarters;
+            # with 3y price data, valid training rows start ~2024-03,
+            # which is after all tickers' earliest fundamental date)
+            df = get_stock_data(ticker, period="3y")
+            if df.empty or len(df) < 200:
                 logger.warning("Skipping %s — insufficient history", ticker)
                 continue
 
@@ -328,13 +334,14 @@ def build_training_dataset(
                         else np.nan
                     )
 
-                # Google Trends (time-aligned, no leakage)
-                for col in TRENDS_FEATURES:
-                    data_point[col] = (
-                        aligned_trends[col].iloc[i]
-                        if col in aligned_trends.columns
-                        else np.nan
-                    )
+                # Google Trends (only if data was fetched successfully)
+                if not trends_df.empty:
+                    for col in TRENDS_FEATURES:
+                        data_point[col] = (
+                            aligned_trends[col].iloc[i]
+                            if col in aligned_trends.columns
+                            else np.nan
+                        )
 
                 # SEC EDGAR (time-aligned, no leakage)
                 for col in SEC_FEATURES:

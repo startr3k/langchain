@@ -32,29 +32,36 @@ def get_google_trends(ticker: str, timeframe: str = "today 5-y") -> pd.DataFrame
     Returns:
         Weekly date-indexed DataFrame with interest columns, or empty DataFrame.
     """
-    try:
-        from pytrends.request import TrendReq
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            from pytrends.request import TrendReq
 
-        # Add a stock-related keyword to disambiguate
-        kw = f"{ticker} stock"
+            # Add a stock-related keyword to disambiguate
+            kw = f"{ticker} stock"
 
-        pytrends = TrendReq(hl="en-US", tz=360, timeout=(10, 25))
-        pytrends.build_payload([kw], cat=0, timeframe=timeframe, geo="US")
-        df = pytrends.interest_over_time()
+            pytrends = TrendReq(hl="en-US", tz=360, timeout=(10, 25))
+            pytrends.build_payload([kw], cat=0, timeframe=timeframe, geo="US")
+            df = pytrends.interest_over_time()
 
-        if df is None or df.empty:
-            return pd.DataFrame()
+            if df is None or df.empty:
+                return pd.DataFrame()
 
-        result = pd.DataFrame(index=df.index)
-        result["gtrends_interest"] = df[kw].values
-        result["gtrends_interest_sma_4w"] = result["gtrends_interest"].rolling(4).mean()
-        result["gtrends_interest_change_4w"] = result["gtrends_interest"].pct_change(4)
+            result = pd.DataFrame(index=df.index)
+            result["gtrends_interest"] = df[kw].values
+            result["gtrends_interest_sma_4w"] = result["gtrends_interest"].rolling(4).mean()
+            result["gtrends_interest_change_4w"] = result["gtrends_interest"].pct_change(4)
 
-        return result
+            return result
 
-    except Exception:
-        logger.debug("Could not fetch Google Trends for %s", ticker)
-        return pd.DataFrame()
+        except Exception:
+            if attempt < max_retries - 1:
+                wait = 2 ** (attempt + 1)
+                logger.debug("Google Trends attempt %d failed for %s, retrying in %ds", attempt + 1, ticker, wait)
+                time.sleep(wait)
+            else:
+                logger.debug("Could not fetch Google Trends for %s after %d attempts", ticker, max_retries)
+                return pd.DataFrame()
 
 
 def align_trends_to_dates(
