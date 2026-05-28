@@ -14,7 +14,7 @@ from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
-from flaml import AutoML
+from flaml import AutoML, tune
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
@@ -59,6 +59,39 @@ def _fill_semantic_nan(df: pd.DataFrame) -> pd.DataFrame:
     for col, fill_value in _SEMANTIC_NAN_FILLS.items():
         if col in df.columns:
             df[col] = df[col].fillna(fill_value)
+    return df
+
+
+# Raw dollar features that span many orders of magnitude across
+# stocks (e.g. Apple $90B revenue vs a micro-cap $10M).  Applying
+# signed log1p compresses the scale while preserving sign and zero.
+_LOG_TRANSFORM_FEATURES = [
+    "hist_total_revenue",
+    "hist_operating_income",
+    "hist_net_income",
+    "hist_total_assets",
+    "hist_total_debt",
+    "hist_stockholders_equity",
+    "hist_book_value_per_share",
+    "hist_current_assets",
+    "hist_capex",
+    "hist_diluted_eps",
+    "earnings_eps_actual",
+    "sec_net_income",
+    "sec_operating_cash_flow",
+]
+
+
+def _log_transform(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply signed log1p to raw dollar features.
+
+    Uses sign(x) * log1p(|x|) to handle negative values (losses)
+    while compressing the enormous scale differences between
+    large-cap and micro-cap stocks.
+    """
+    for col in _LOG_TRANSFORM_FEATURES:
+        if col in df.columns:
+            df[col] = np.sign(df[col]) * np.log1p(df[col].abs())
     return df
 
 
@@ -121,6 +154,9 @@ class StockReturnPredictor:
         # missing.  Using meaningful defaults preserves this signal.
         X = _fill_semantic_nan(X)
 
+        # Log-transform raw dollar features to compress scale differences
+        X = _log_transform(X)
+
         # Fill remaining NaN features with median and save medians for prediction
         self.feature_medians = X.median()
         X = X.fillna(self.feature_medians)
@@ -162,16 +198,78 @@ class StockReturnPredictor:
             len(feature_cols), time_budget,
         )
 
+        # Regularization-constrained search to prevent overfitting:
+        # - shallow trees (max_depth ≤ 8)
+        # - high min samples per leaf
+        # - subsampling rows + columns
+        # - early stopping after 50 rounds without improvement
+        custom_hp = {
+            "xgboost": {
+                "max_depth": {
+                    "domain": tune.randint(3, 9),
+                    "init_value": 6,
+                },
+                "min_child_weight": {
+                    "domain": tune.randint(10, 101),
+                    "init_value": 30,
+                },
+                "subsample": {
+                    "domain": tune.uniform(0.5, 0.9),
+                    "init_value": 0.7,
+                },
+                "colsample_bytree": {
+                    "domain": tune.uniform(0.3, 0.8),
+                    "init_value": 0.5,
+                },
+                "reg_alpha": {
+                    "domain": tune.loguniform(0.01, 10.0),
+                    "init_value": 1.0,
+                },
+                "reg_lambda": {
+                    "domain": tune.loguniform(1.0, 50.0),
+                    "init_value": 10.0,
+                },
+            },
+            "lgbm": {
+                "max_depth": {
+                    "domain": tune.randint(3, 9),
+                    "init_value": 6,
+                },
+                "min_child_samples": {
+                    "domain": tune.randint(50, 501),
+                    "init_value": 100,
+                },
+                "subsample": {
+                    "domain": tune.uniform(0.5, 0.9),
+                    "init_value": 0.7,
+                },
+                "colsample_bytree": {
+                    "domain": tune.uniform(0.3, 0.8),
+                    "init_value": 0.5,
+                },
+                "reg_alpha": {
+                    "domain": tune.loguniform(0.01, 10.0),
+                    "init_value": 1.0,
+                },
+                "reg_lambda": {
+                    "domain": tune.loguniform(1.0, 50.0),
+                    "init_value": 10.0,
+                },
+            },
+        }
+
         self.automl.fit(
             X_train=X_train,
             y_train=y_train,
             task="regression",
             time_budget=time_budget,
             metric="r2",
-            estimator_list=["xgboost", "lgbm", "rf", "extra_tree"],
+            estimator_list=["xgboost", "lgbm"],
             eval_method="cv",
             n_splits=5,
             verbose=0,
+            custom_hp=custom_hp,
+            early_stop=True,
         )
 
         self.is_trained = True
@@ -239,6 +337,7 @@ class StockReturnPredictor:
                 df[col] = 0.0
         df = df[self.feature_names]
         df = _fill_semantic_nan(df)
+        df = _log_transform(df)
         if self.feature_medians is not None:
             df = df.fillna(self.feature_medians)
         else:

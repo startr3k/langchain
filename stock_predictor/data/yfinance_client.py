@@ -99,9 +99,11 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # MACD
     ema_12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema_26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema_12 - ema_26
-    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
+    # Normalize MACD by price so it's comparable across stocks
+    df["MACD"] = (ema_12 - ema_26) / df["Close"]
+    macd_signal = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_Signal"] = macd_signal
+    df["MACD_Hist"] = df["MACD"] - macd_signal
 
     # Bollinger Bands
     bb_sma = df["Close"].rolling(window=20).mean()
