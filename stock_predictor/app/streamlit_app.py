@@ -22,7 +22,11 @@ from stock_predictor.data.feature_engineering import (
     TARGET_COLUMN,
     build_training_dataset,
 )
-from stock_predictor.data.sentiment import get_sentiment_summary, get_trending_tickers_from_social
+from stock_predictor.data.sentiment import (
+    get_sentiment_features,
+    get_sentiment_summary,
+    get_trending_tickers_from_social,
+)
 from stock_predictor.data.yfinance_client import get_stock_data, get_stock_info, NASDAQ_TOP_TICKERS
 from stock_predictor.models.automl_model import StockReturnPredictor
 
@@ -65,6 +69,7 @@ st.sidebar.markdown("---")
 page = st.sidebar.radio(
     "Navigate",
     [
+        "Top Recommendations",
         "AI Stock Advisor",
         "Stock Analysis",
         "Social Sentiment",
@@ -74,9 +79,175 @@ page = st.sidebar.radio(
 )
 
 # ---------------------------------------------------------------------------
+# Page: Top Recommendations
+# ---------------------------------------------------------------------------
+if page == "Top Recommendations":
+    st.title("Top Stock Recommendations")
+    st.markdown(
+        "Combines **model probability** (P(≥30% peak gain in 3 months)) with "
+        "**live sentiment** from Reddit, Finviz, and StockTwits to produce a "
+        "composite score ranking."
+    )
+
+    col_cfg1, col_cfg2, col_cfg3 = st.columns(3)
+    with col_cfg1:
+        top_x = st.number_input(
+            "Show top X results",
+            min_value=1,
+            max_value=100,
+            value=10,
+            step=1,
+        )
+    with col_cfg2:
+        sentiment_weight = st.slider(
+            "Sentiment weight",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.3,
+            step=0.05,
+            help="Weight for sentiment in composite score. "
+                 "Model probability weight = 1 - sentiment weight.",
+        )
+    with col_cfg3:
+        ticker_source = st.selectbox(
+            "Ticker universe",
+            ["NASDAQ Top 50", "NASDAQ Top 100", "Custom list"],
+        )
+
+    if ticker_source == "Custom list":
+        custom_tickers = st.text_area(
+            "Enter tickers (comma-separated)",
+            value=", ".join(NASDAQ_TOP_TICKERS[:20]),
+        )
+        scan_tickers = [t.strip().upper() for t in custom_tickers.split(",") if t.strip()]
+    elif ticker_source == "NASDAQ Top 100":
+        scan_tickers = NASDAQ_TOP_TICKERS[:100]
+    else:
+        scan_tickers = NASDAQ_TOP_TICKERS[:50]
+
+    model_weight = 1.0 - sentiment_weight
+
+    if st.button("Generate Recommendations", type="primary"):
+        try:
+            predictor = StockReturnPredictor()
+            predictor.load()
+        except FileNotFoundError:
+            st.error("Model not trained yet. Go to 'Model Training' first.")
+            st.stop()
+
+        results = []
+        progress_bar = st.progress(0, text="Running predictions...")
+        status_text = st.empty()
+
+        for i, ticker in enumerate(scan_tickers):
+            progress_bar.progress(
+                (i + 1) / len(scan_tickers),
+                text=f"Processing {ticker} ({i+1}/{len(scan_tickers)})...",
+            )
+
+            # Model prediction
+            pred = predictor.predict_ticker(ticker)
+            prob = pred.get("probability_30pct_gain")
+            if prob is None:
+                continue
+
+            # Live sentiment
+            status_text.text(f"Fetching sentiment for {ticker}...")
+            try:
+                sent_feats = get_sentiment_features(ticker)
+            except Exception:
+                sent_feats = {}
+
+            mean_polarity = sent_feats.get("sentiment_mean_polarity", 0.0)
+            total_mentions = sent_feats.get("sentiment_total_mentions", 0)
+            reddit_count = sent_feats.get("reddit_mention_count", 0)
+            stocktwits_bull = sent_feats.get("stocktwits_bullish_count", 0)
+            stocktwits_bear = sent_feats.get("stocktwits_bearish_count", 0)
+            bull_bear_ratio = sent_feats.get("stocktwits_bull_bear_ratio", 1.0)
+
+            # Normalize sentiment polarity from [-1, 1] to [0, 1]
+            sentiment_score = (mean_polarity + 1.0) / 2.0
+
+            # Composite score: weighted combination
+            composite = model_weight * prob + sentiment_weight * sentiment_score
+
+            results.append({
+                "Ticker": ticker,
+                "Model P(≥30%)": round(prob, 4),
+                "Sentiment Score": round(sentiment_score, 4),
+                "Composite Score": round(composite, 4),
+                "Signal": pred.get("signal", "HOLD"),
+                "Sentiment Polarity": round(mean_polarity, 3),
+                "Total Mentions": total_mentions,
+                "Reddit Mentions": reddit_count,
+                "StockTwits Bull/Bear": f"{stocktwits_bull}/{stocktwits_bear}",
+            })
+
+        progress_bar.empty()
+        status_text.empty()
+
+        if not results:
+            st.warning("No results — model could not generate predictions.")
+            st.stop()
+
+        # Sort by composite score and take top X
+        results.sort(key=lambda x: x["Composite Score"], reverse=True)
+        top_results = results[:top_x]
+
+        st.subheader(f"Top {len(top_results)} Recommendations")
+        st.caption(
+            f"Score = {model_weight:.0%} × Model Probability + "
+            f"{sentiment_weight:.0%} × Sentiment Score"
+        )
+
+        df = pd.DataFrame(top_results)
+        st.dataframe(
+            df.style.format({
+                "Model P(≥30%)": "{:.1%}",
+                "Sentiment Score": "{:.1%}",
+                "Composite Score": "{:.1%}",
+                "Sentiment Polarity": "{:+.3f}",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # Highlight top picks
+        buy_picks = [r for r in top_results if r["Signal"] == "BUY"]
+        if buy_picks:
+            st.success(f"**{len(buy_picks)} BUY signals** in top {len(top_results)}:")
+            for r in buy_picks:
+                model_p = r["Model P(≥30%)"]
+                sent_p = r["Sentiment Polarity"]
+                mentions = r["Total Mentions"]
+                comp = r["Composite Score"]
+                st.write(
+                    f"**{r['Ticker']}** — "
+                    f"Model: {model_p:.1%}, "
+                    f"Sentiment: {sent_p:+.3f} "
+                    f"({mentions} mentions), "
+                    f"Composite: {comp:.1%}"
+                )
+
+        # Show all results table
+        with st.expander(f"All {len(results)} scanned stocks"):
+            all_df = pd.DataFrame(results)
+            st.dataframe(
+                all_df.style.format({
+                    "Model P(≥30%)": "{:.1%}",
+                    "Sentiment Score": "{:.1%}",
+                    "Composite Score": "{:.1%}",
+                    "Sentiment Polarity": "{:+.3f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Page: AI Stock Advisor (Chat)
 # ---------------------------------------------------------------------------
-if page == "AI Stock Advisor":
+elif page == "AI Stock Advisor":
     st.title("AI Stock Investment Advisor")
     st.markdown(
         "Ask the AI agent for stock recommendations. It uses YFinance data, "
