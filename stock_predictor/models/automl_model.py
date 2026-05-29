@@ -665,6 +665,7 @@ class StockReturnPredictor:
             }
 
         probability = self.predict(row)
+        explanation = self.explain_prediction(row, top_n=5)
 
         # Stage 2: rule-based post-filters on raw features
         if isinstance(row, dict):
@@ -691,6 +692,7 @@ class StockReturnPredictor:
             "rules_pass": rules_pass,
             "market_cap": mcap,
             "min_market_cap": min_market_cap,
+            "explanation": explanation,
         }
 
     def save(self) -> None:
@@ -716,6 +718,80 @@ class StockReturnPredictor:
             self.optimal_threshold = joblib.load(THRESHOLD_PATH)
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
+
+    def explain_prediction(
+        self, features: dict | pd.DataFrame, top_n: int = 5,
+    ) -> list[dict]:
+        """Explain a single prediction using SHAP values.
+
+        Args:
+            features: Feature dict or single-row DataFrame (same as predict()).
+            top_n: Number of top contributing features to return.
+
+        Returns:
+            List of dicts with 'feature', 'shap_value', 'feature_value',
+            and 'direction' ('+' or '-') sorted by absolute SHAP magnitude.
+        """
+        if not self.is_trained:
+            self.load()
+
+        if isinstance(features, dict):
+            df = pd.DataFrame([features])
+        else:
+            df = features.copy()
+
+        df = _compute_derived_features(df)
+        for col in self.feature_names:
+            if col not in df.columns:
+                df[col] = 0.0
+        df = df[self.feature_names]
+        df = _fill_semantic_nan(df)
+        df = _log_transform(df)
+        if self.feature_medians is not None:
+            df = df.fillna(self.feature_medians)
+        else:
+            df = df.fillna(0.0)
+
+        try:
+            import shap
+            model = self.automl.model.estimator
+
+            # Use the model's actual feature set (FLAML may drop constant
+            # columns like Fundamental_Surprise when the source data is
+            # absent, making the model's feature count < self.feature_names).
+            if hasattr(model, "feature_name_"):
+                model_features = model.feature_name_
+            elif hasattr(model, "feature_names_in_"):
+                model_features = list(model.feature_names_in_)
+            else:
+                model_features = self.feature_names
+
+            df_shap = df[[c for c in model_features if c in df.columns]]
+
+            explainer = shap.TreeExplainer(model)
+            shap_out = explainer(df_shap)
+
+            # shap_out.values shape: (1, n_features) or (1, n_features, 2)
+            sv = shap_out.values[0]
+            if sv.ndim == 2:
+                sv = sv[:, 1]  # class 1 SHAP values
+
+            feature_names = df_shap.columns.tolist()
+            pairs = list(zip(feature_names, sv, df_shap.iloc[0].values))
+            pairs.sort(key=lambda x: abs(x[1]), reverse=True)
+
+            return [
+                {
+                    "feature": name,
+                    "shap_value": round(float(val), 4),
+                    "feature_value": round(float(fv), 4),
+                    "direction": "+" if val > 0 else "-",
+                }
+                for name, val, fv in pairs[:top_n]
+            ]
+        except Exception as e:
+            logger.warning("SHAP explanation failed: %s", e)
+            return []
 
     def get_feature_importance(self, top_n: int = 20) -> list[tuple[str, float]]:
         """Return top feature importances from the trained model.

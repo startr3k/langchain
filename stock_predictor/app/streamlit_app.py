@@ -187,6 +187,7 @@ if page == "Top Recommendations":
                 "Transcript Sentiment": f"{transcript_sent:+.3f}" if transcript_sent is not None else "N/A",
                 "_source_texts": sent_feats.get("source_texts", []),
                 "_transcript_url": transcript_url,
+                "_explanation": pred.get("explanation", []),
             })
 
         progress_bar.empty()
@@ -222,14 +223,15 @@ if page == "Top Recommendations":
             hide_index=True,
         )
 
-        # Detailed view for each top pick with source texts
-        st.subheader("Sentiment Details")
+        # Detailed view for each top pick
+        st.subheader("Prediction Details")
         for r in top_results:
             ticker_name = r["Ticker"]
             model_p = r["Model P(≥20%)"]
             comp = r["Composite Score"]
             source_texts = r.get("_source_texts", [])
             transcript_url = r.get("_transcript_url")
+            explanation = r.get("_explanation", [])
 
             with st.expander(
                 f"**{ticker_name}** — Composite: {comp:.1%} | "
@@ -242,6 +244,22 @@ if page == "Top Recommendations":
                 col2.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
                 col3.metric("Mentions", r["Total Mentions"])
                 col4.metric("Composite", f"{comp:.1%}")
+
+                # SHAP-based prediction explanation
+                if explanation:
+                    st.markdown("---")
+                    st.markdown("**Why This Prediction** (top feature contributions)")
+                    for item in explanation:
+                        feat = item["feature"]
+                        shap_val = item["shap_value"]
+                        direction = item["direction"]
+                        if direction == "+":
+                            color = ":green[▲]"
+                        else:
+                            color = ":red[▼]"
+                        st.markdown(
+                            f"{color} **{feat}**: {shap_val:+.4f}"
+                        )
 
                 if transcript_url:
                     st.markdown(f"[View Full Transcript]({transcript_url})")
