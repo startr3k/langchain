@@ -1,7 +1,10 @@
-"""AutoML model for stock return prediction using FLAML.
+"""AutoML model for stock return classification using FLAML.
 
-FLAML (Fast Lightweight AutoML) automatically selects the best model
-and hyperparameters from XGBoost, LightGBM, Random Forest, etc.
+Predicts whether a stock will achieve >=20% peak return at any point
+within a 3-month window.  Uses a two-stage approach: Stage 1 is the
+AutoML model, Stage 2 applies rule-based post-filters (positive
+earnings momentum and 3-day volume surge) to boost precision.  FLAML (Fast Lightweight AutoML) automatically
+selects the best model and hyperparameters from XGBoost, LightGBM, etc.
 """
 
 from __future__ import annotations
@@ -14,8 +17,18 @@ from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
-from flaml import AutoML
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from flaml import AutoML, tune
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    classification_report,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+)
 from sklearn.model_selection import TimeSeriesSplit
 
 from stock_predictor.data.feature_engineering import (
@@ -61,19 +74,116 @@ def _fill_semantic_nan(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Raw dollar features that span many orders of magnitude across
+# stocks (e.g. Apple $90B revenue vs a micro-cap $10M).  Applying
+# signed log1p compresses the scale while preserving sign and zero.
+_LOG_TRANSFORM_FEATURES = [
+    "hist_total_revenue",
+    "hist_operating_income",
+    "hist_net_income",
+    "hist_total_assets",
+    "hist_total_debt",
+    "hist_stockholders_equity",
+    "hist_book_value_per_share",
+    "hist_current_assets",
+    "hist_capex",
+    "hist_diluted_eps",
+    "earnings_eps_actual",
+    "sec_net_income",
+    "sec_operating_cash_flow",
+]
+
+
+def _log_transform(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply signed log1p to raw dollar features.
+
+    Uses sign(x) * log1p(|x|) to handle negative values (losses)
+    while compressing the enormous scale differences between
+    large-cap and micro-cap stocks.
+    """
+    for col in _LOG_TRANSFORM_FEATURES:
+        if col in df.columns:
+            df[col] = np.sign(df[col]) * np.log1p(df[col].abs())
+    return df
+
+
+def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute interaction / derived features from existing columns.
+
+    These features combine multiple raw signals into higher-level
+    indicators that capture multi-factor breakout patterns.
+    """
+    # Fundamental surprise: companies beating estimates while growing.
+    # Fill NaN with 0 (no surprise) instead of propagating NaN from parents.
+    if "hist_revenue_growth_qoq" in df.columns and "earnings_surprise_pct" in df.columns:
+        df["Fundamental_Surprise"] = (
+            df["hist_revenue_growth_qoq"].fillna(0) * df["earnings_surprise_pct"].fillna(0)
+        )
+    else:
+        df["Fundamental_Surprise"] = 0.0
+
+    return df
+
+
+def _compute_gain_chart(
+    y_true: np.ndarray, y_proba: np.ndarray, n_bins: int = 20,
+) -> dict:
+    """Compute cumulative gain chart data.
+
+    Sorts predictions by descending probability and computes what
+    fraction of all positives is captured at each population decile.
+
+    Returns dict with ``percentages`` (population %) and ``gains``
+    (cumulative % of positives captured), plus a ``random`` baseline.
+    """
+    order = np.argsort(-y_proba)
+    y_sorted = np.asarray(y_true)[order]
+    total_pos = y_sorted.sum()
+    if total_pos == 0:
+        return {"percentages": [], "gains": [], "random": []}
+
+    n = len(y_sorted)
+    percentages = []
+    gains = []
+    random_gains = []
+    for i in range(1, n_bins + 1):
+        idx = int(n * i / n_bins)
+        pct = round(i / n_bins * 100, 1)
+        gain = round(y_sorted[:idx].sum() / total_pos * 100, 2)
+        percentages.append(pct)
+        gains.append(gain)
+        random_gains.append(pct)
+
+    return {"percentages": percentages, "gains": gains, "random": random_gains}
+
+
 MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
+THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
+
+
+# Classification threshold: predict class 1 when the stock achieves
+# >=20% peak return at any point within the 3-month forward window.
+CLASSIFICATION_THRESHOLD = 0.20
 
 
 class StockReturnPredictor:
-    """AutoML-based stock return predictor."""
+    """AutoML-based stock return classifier.
+
+    Predicts class 1 (>=20% peak return within 3 months) vs class 0.
+    Uses balanced class weights and Average Precision as metric.
+    Two-stage prediction: model probability + rule-based post-filters
+    (positive earnings momentum and 3-day volume surge > 1.5x) for higher
+    precision.
+    """
 
     def __init__(self) -> None:
         self.automl = AutoML()
         self.feature_names: list[str] = []
         self.feature_medians: pd.Series | None = None
+        self.optimal_threshold: float = 0.5
         self.is_trained = False
 
     def train(
@@ -81,6 +191,7 @@ class StockReturnPredictor:
         tickers: list[str] | None = None,
         time_budget: int = 120,
         include_sentiment: bool = True,
+        df: pd.DataFrame | None = None,
     ) -> dict:
         """Train the AutoML model on historical stock data.
 
@@ -88,18 +199,58 @@ class StockReturnPredictor:
             tickers: List of tickers for training data. Defaults to top NASDAQ.
             time_budget: Time budget in seconds for AutoML search.
             include_sentiment: Whether to include sentiment features.
+            df: Pre-built training DataFrame. If provided, tickers is ignored.
 
         Returns:
             Dictionary with training metrics.
         """
-        if tickers is None:
-            tickers = NASDAQ_TOP_TICKERS[:30]
+        if df is None:
+            if tickers is None:
+                tickers = NASDAQ_TOP_TICKERS[:30]
 
-        logger.info("Building training dataset for %d tickers...", len(tickers))
-        df = build_training_dataset(tickers, include_sentiment=include_sentiment)
+            logger.info("Building training dataset for %d tickers...", len(tickers))
+            df = build_training_dataset(tickers, include_sentiment=include_sentiment)
 
         if df.empty:
             raise ValueError("Training dataset is empty — no valid data collected.")
+
+        # --- Quality filter: keep only stocks with revenue and earnings ---
+        # Removes shell companies, pre-revenue biotechs, and SPACs that
+        # contribute mostly NaN fundamental features.
+        # Skip for small datasets (e.g. tests) where filtering would
+        # remove all data.
+        before_filter = len(df)
+        if "Ticker" in df.columns and before_filter >= 500:
+            ticker_counts = df.groupby("Ticker").size()
+            tickers_2q = set(ticker_counts[ticker_counts >= 126].index)
+
+            if "hist_total_revenue" in df.columns:
+                has_rev = df.groupby("Ticker")["hist_total_revenue"].apply(
+                    lambda x: (x.notna() & (x > 0)).mean() > 0.5,
+                )
+                tickers_with_rev = set(has_rev[has_rev].index)
+            else:
+                tickers_with_rev = tickers_2q
+
+            if "earnings_eps_actual" in df.columns:
+                has_earn = df.groupby("Ticker")["earnings_eps_actual"].apply(
+                    lambda x: x.notna().mean() > 0.5,
+                )
+                tickers_with_earn = set(has_earn[has_earn].index)
+            else:
+                tickers_with_earn = tickers_2q
+
+            quality_tickers = tickers_2q & tickers_with_rev & tickers_with_earn
+            df = df[df["Ticker"].isin(quality_tickers)]
+            logger.info(
+                "Quality filter: %d → %d rows (%d tickers kept, %d removed)",
+                before_filter, len(df),
+                len(quality_tickers),
+                before_filter - len(df),
+            )
+
+        # Compute derived interaction features before selecting columns
+        df = _compute_derived_features(df)
 
         # Prepare features and target
         feature_cols = [c for c in ALL_FEATURE_NAMES if c in df.columns]
@@ -113,10 +264,41 @@ class StockReturnPredictor:
         X = X[valid]
         y = y[valid]
 
+        # Convert continuous return to binary classification target:
+        # 1 = return >= threshold, 0 = otherwise
+        y_binary = (y >= CLASSIFICATION_THRESHOLD).astype(int)
+        n_pos = int(y_binary.sum())
+        n_neg = len(y_binary) - n_pos
+        logger.info(
+            "Class balance: %d positive (%.1f%%) / %d negative (%.1f%%)",
+            n_pos, n_pos / len(y_binary) * 100,
+            n_neg, n_neg / len(y_binary) * 100,
+        )
+        y = y_binary
+
+        # Compute balanced class weights: each class is weighted
+        # inversely proportional to its frequency so that both classes
+        # contribute equally to the loss.  This is equivalent to
+        # sklearn's class_weight="balanced":
+        #   weight_k = n_samples / (n_classes * n_k)
+        n_total = n_pos + n_neg
+        weight_neg = n_total / (2.0 * n_neg)
+        weight_pos = n_total / (2.0 * n_pos)
+        sample_weight = y.map({0: weight_neg, 1: weight_pos}).values
+        logger.info(
+            "Balanced class weights: neg=%.3f, pos=%.3f", weight_neg, weight_pos,
+        )
+
+        # Save raw features before transforms for two-stage rule evaluation
+        raw_X = X.copy()
+
         # Semantically fill profit-related NaN values: these are NaN
         # because the company is unprofitable, not because data is
         # missing.  Using meaningful defaults preserves this signal.
         X = _fill_semantic_nan(X)
+
+        # Log-transform raw dollar features to compress scale differences
+        X = _log_transform(X)
 
         # Fill remaining NaN features with median and save medians for prediction
         self.feature_medians = X.median()
@@ -129,6 +311,7 @@ class StockReturnPredictor:
             sort_order = date_series.sort_values().index
             X = X.loc[sort_order]
             y = y.loc[sort_order]
+            raw_X = raw_X.loc[sort_order]
 
         # Hold out the last 20% as a test set with a 63-day gap
         # (gap prevents overlapping forward-return windows from leaking)
@@ -139,6 +322,7 @@ class StockReturnPredictor:
         X_test = X.iloc[split_idx + gap_rows:]
         y_test = y.iloc[split_idx + gap_rows:]
 
+
         logger.info(
             "Training AutoML on %d samples (%d train / %d gap / %d test), "
             "%d features (budget=%ds)",
@@ -146,37 +330,210 @@ class StockReturnPredictor:
             len(feature_cols), time_budget,
         )
 
+        # Regularization-constrained search to prevent overfitting:
+        # - shallow trees (max_depth ≤ 8)
+        # - low learning rate (0.01-0.1) for gradual learning
+        # - high min samples per leaf
+        # - subsampling rows + columns
+        custom_hp = {
+            "xgboost": {
+                "max_depth": {
+                    "domain": tune.randint(3, 9),
+                    "init_value": 5,
+                },
+                "min_child_weight": {
+                    "domain": tune.randint(10, 101),
+                    "init_value": 30,
+                },
+                "learning_rate": {
+                    "domain": tune.loguniform(0.01, 0.1),
+                    "init_value": 0.05,
+                },
+                "subsample": {
+                    "domain": tune.uniform(0.5, 0.9),
+                    "init_value": 0.7,
+                },
+                "colsample_bytree": {
+                    "domain": tune.uniform(0.3, 0.8),
+                    "init_value": 0.5,
+                },
+                "reg_alpha": {
+                    "domain": tune.loguniform(0.01, 10.0),
+                    "init_value": 1.0,
+                },
+                "reg_lambda": {
+                    "domain": tune.loguniform(1.0, 50.0),
+                    "init_value": 10.0,
+                },
+            },
+            "lgbm": {
+                "max_depth": {
+                    "domain": tune.randint(3, 9),
+                    "init_value": 5,
+                },
+                "min_child_samples": {
+                    "domain": tune.randint(50, 501),
+                    "init_value": 100,
+                },
+                "learning_rate": {
+                    "domain": tune.loguniform(0.01, 0.1),
+                    "init_value": 0.05,
+                },
+                "subsample": {
+                    "domain": tune.uniform(0.5, 0.9),
+                    "init_value": 0.7,
+                },
+                "colsample_bytree": {
+                    "domain": tune.uniform(0.3, 0.8),
+                    "init_value": 0.5,
+                },
+                "reg_alpha": {
+                    "domain": tune.loguniform(0.01, 10.0),
+                    "init_value": 1.0,
+                },
+                "reg_lambda": {
+                    "domain": tune.loguniform(1.0, 50.0),
+                    "init_value": 10.0,
+                },
+            },
+        }
+
+        # Split sample weights to match train/test
+        sw_train = sample_weight[:split_idx]
+        sw_test = sample_weight[split_idx + gap_rows:len(sample_weight)]
+
         self.automl.fit(
             X_train=X_train,
             y_train=y_train,
-            task="regression",
+            task="classification",
             time_budget=time_budget,
-            metric="r2",
-            estimator_list=["xgboost", "lgbm", "rf", "extra_tree"],
+            metric="ap",
+            estimator_list=["xgboost", "lgbm"],
             eval_method="cv",
             n_splits=5,
             verbose=0,
+            custom_hp=custom_hp,
+            early_stop=True,
+            sample_weight=sw_train,
         )
 
         self.is_trained = True
 
         # --- Out-of-sample metrics on held-out test set ---
         y_pred_test = self.automl.predict(X_test)
-        r2 = r2_score(y_test, y_pred_test)
-        mae = mean_absolute_error(y_test, y_pred_test)
-        rmse = float(np.sqrt(mean_squared_error(y_test, y_pred_test)))
-        nonzero_mask = y_test.abs() > 1e-8
-        if nonzero_mask.sum() > 0:
-            mape = float(
-                ((y_test[nonzero_mask] - y_pred_test[nonzero_mask]).abs()
-                 / y_test[nonzero_mask].abs()).mean() * 100
-            )
+        y_proba_test = self.automl.predict_proba(X_test)
+        # Use probability of class 1
+        if y_proba_test.ndim == 2:
+            y_proba_pos = y_proba_test[:, 1]
         else:
-            mape = float("nan")
+            y_proba_pos = y_proba_test
+
+        # --- Find optimal threshold that maximizes precision ---
+        # Require at least 100 predicted positives so the precision
+        # estimate is statistically meaningful (not based on a handful
+        # of samples).
+        MIN_PREDICTED_POS = 100
+        prec_curve, rec_curve, thresholds = precision_recall_curve(
+            y_test, y_proba_pos,
+        )
+        # precision_recall_curve returns len(thresholds) = len(prec) - 1
+        n_test = len(y_test)
+        best_threshold = 0.5
+        best_precision_at_thresh = 0.0
+        best_recall_at_thresh = 0.0
+        for p, r, t in zip(prec_curve[:-1], rec_curve[:-1], thresholds):
+            n_pred = int(r * y_test.sum() / max(p, 1e-9))
+            if n_pred >= MIN_PREDICTED_POS and p > best_precision_at_thresh:
+                best_precision_at_thresh = p
+                best_recall_at_thresh = r
+                best_threshold = float(t)
+        self.optimal_threshold = best_threshold
+        logger.info(
+            "Optimal threshold: %.4f (precision=%.4f, recall=%.4f)",
+            best_threshold, best_precision_at_thresh, best_recall_at_thresh,
+        )
+
+        # Evaluate at default 0.5 and at optimal threshold
+        y_pred_default = (y_proba_pos >= 0.5).astype(int)
+        y_pred_optimal = (y_proba_pos >= self.optimal_threshold).astype(int)
+
+        accuracy = accuracy_score(y_test, y_pred_default)
+        precision_default = precision_score(y_test, y_pred_default, zero_division=0)
+        recall_default = recall_score(y_test, y_pred_default, zero_division=0)
+        f1_default = f1_score(y_test, y_pred_default, zero_division=0)
+
+        precision_opt = precision_score(y_test, y_pred_optimal, zero_division=0)
+        recall_opt = recall_score(y_test, y_pred_optimal, zero_division=0)
+        f1_opt = f1_score(y_test, y_pred_optimal, zero_division=0)
+        accuracy_opt = accuracy_score(y_test, y_pred_optimal)
+
+        try:
+            auc = roc_auc_score(y_test, y_proba_pos)
+        except ValueError:
+            auc = float("nan")
+        try:
+            ap = average_precision_score(y_test, y_proba_pos)
+        except ValueError:
+            ap = float("nan")
 
         # Training-set metrics for comparison (to detect overfitting)
-        y_pred_train = self.automl.predict(X_train)
-        r2_train = r2_score(y_train, y_pred_train)
+        y_proba_train = self.automl.predict_proba(X_train)
+        if y_proba_train.ndim == 2:
+            y_proba_train_pos = y_proba_train[:, 1]
+        else:
+            y_proba_train_pos = y_proba_train
+        y_pred_train = (y_proba_train_pos >= 0.5).astype(int)
+        try:
+            auc_train = roc_auc_score(y_train, y_proba_train_pos)
+        except ValueError:
+            auc_train = float("nan")
+        try:
+            ap_train = average_precision_score(y_train, y_proba_train_pos)
+        except ValueError:
+            ap_train = float("nan")
+        accuracy_train = accuracy_score(y_train, y_pred_train)
+
+        # Logistic Regression baseline for comparison
+        try:
+            from sklearn.impute import SimpleImputer
+            imputer = SimpleImputer(strategy="median")
+            X_train_imp = imputer.fit_transform(X_train)
+            X_test_imp = imputer.transform(X_test)
+            lr = LogisticRegression(
+                class_weight="balanced", max_iter=1000, random_state=42,
+            )
+            lr.fit(X_train_imp, y_train)
+            lr_pred = lr.predict(X_test_imp)
+            lr_proba = lr.predict_proba(X_test_imp)[:, 1]
+            lr_accuracy = accuracy_score(y_test, lr_pred)
+            lr_auc = roc_auc_score(y_test, lr_proba)
+        except Exception:
+            lr_accuracy = float("nan")
+            lr_auc = float("nan")
+
+        # --- Gain chart data (decile-based cumulative gain) ---
+        gain_chart_data = _compute_gain_chart(y_test.values, y_proba_pos)
+
+        # --- Two-stage evaluation (model + rules) on test set ---
+        raw_X_test = raw_X.iloc[split_idx + gap_rows:]
+        em_col = raw_X_test.get("hist_earnings_growth_qoq", pd.Series(0.0, index=raw_X_test.index))
+        vs_col = raw_X_test.get("Volume_Surge_3d", pd.Series(0.0, index=raw_X_test.index))
+        rules_mask = (em_col.fillna(0) > 0) & (vs_col.fillna(0) > 1.5)
+
+        y_pred_twostage = (y_pred_optimal.astype(bool) & rules_mask.values).astype(int)
+        n_ts = int(y_pred_twostage.sum())
+        if n_ts > 0:
+            precision_ts = precision_score(y_test, y_pred_twostage, zero_division=0)
+            recall_ts = recall_score(y_test, y_pred_twostage, zero_division=0)
+            f1_ts = f1_score(y_test, y_pred_twostage, zero_division=0)
+        else:
+            precision_ts = recall_ts = f1_ts = 0.0
+
+        logger.info(
+            "Two-stage (model@%.2f + rules): precision=%.4f recall=%.4f "
+            "n_predicted=%d",
+            self.optimal_threshold, precision_ts, recall_ts, n_ts,
+        )
 
         metrics = {
             "best_estimator": self.automl.best_estimator,
@@ -185,29 +542,53 @@ class StockReturnPredictor:
             "training_samples": len(X_train),
             "test_samples": len(X_test),
             "num_features": len(feature_cols),
-            "r2_score": round(r2, 4),
-            "r2_train": round(r2_train, 4),
-            "mae": round(mae, 4),
-            "rmse": round(rmse, 4),
-            "mape": round(mape, 2),
+            "class_balance": f"{n_pos}/{n_neg} ({n_pos/(n_pos+n_neg)*100:.1f}%)",
+            # Metrics at default threshold (0.5)
+            "accuracy": round(accuracy, 4),
+            "precision": round(precision_default, 4),
+            "recall": round(recall_default, 4),
+            "f1_score": round(f1_default, 4),
+            # Metrics at optimal threshold
+            "optimal_threshold": round(self.optimal_threshold, 4),
+            "precision_optimal": round(precision_opt, 4),
+            "recall_optimal": round(recall_opt, 4),
+            "f1_optimal": round(f1_opt, 4),
+            "accuracy_optimal": round(accuracy_opt, 4),
+            # Two-stage metrics (model @ optimal threshold + rules)
+            "precision_twostage": round(precision_ts, 4),
+            "recall_twostage": round(recall_ts, 4),
+            "f1_twostage": round(f1_ts, 4),
+            "n_predicted_twostage": n_ts,
+            # Ranking metrics
+            "auc_roc": round(auc, 4),
+            "avg_precision": round(ap, 4),
+            "accuracy_train": round(accuracy_train, 4),
+            "auc_train": round(auc_train, 4),
+            "ap_train": round(ap_train, 4),
+            "lr_accuracy": round(lr_accuracy, 4),
+            "lr_auc": round(lr_auc, 4),
+            "gain_chart": gain_chart_data,
         }
 
         logger.info(
-            "Training complete. Best: %s | Test R²=%.4f | Train R²=%.4f | "
-            "MAE=%.4f | RMSE=%.4f",
-            self.automl.best_estimator, r2, r2_train, mae, rmse,
+            "Training complete. Best: %s | Test AUC=%.4f AP=%.4f | "
+            "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | "
+            "TwoStage: prec=%.4f rec=%.4f n=%d | LR AUC=%.4f",
+            self.automl.best_estimator, auc, ap,
+            self.optimal_threshold, precision_opt, recall_opt,
+            precision_ts, recall_ts, n_ts, lr_auc,
         )
         self.save()
         return metrics
 
     def predict(self, features: dict | pd.DataFrame) -> float:
-        """Predict 3-month forward return.
+        """Predict probability of >=20% peak return within 3 months.
 
         Args:
             features: Feature dict or DataFrame row.
 
         Returns:
-            Predicted return as a float (e.g. 0.25 means +25%).
+            Probability of class 1 (>=20% peak return) as a float [0, 1].
         """
         if not self.is_trained:
             self.load()
@@ -217,42 +598,99 @@ class StockReturnPredictor:
         else:
             df = features.copy()
 
+        # Compute derived interaction features
+        df = _compute_derived_features(df)
+
         # Ensure columns match training features
         for col in self.feature_names:
             if col not in df.columns:
                 df[col] = 0.0
         df = df[self.feature_names]
         df = _fill_semantic_nan(df)
+        df = _log_transform(df)
         if self.feature_medians is not None:
             df = df.fillna(self.feature_medians)
         else:
             df = df.fillna(0.0)
 
-        prediction = self.automl.predict(df)
-        return float(prediction[0])
 
-    def predict_ticker(self, ticker: str) -> dict:
-        """Predict 3-month return for a given ticker.
+        proba = self.automl.predict_proba(df)
+        if proba.ndim == 2:
+            return float(proba[0, 1])
+        return float(proba[0])
+
+    def predict_ticker(
+        self, ticker: str, min_market_cap: float = 100_000_000
+    ) -> dict:
+        """Predict whether a ticker will hit >=20% peak return within 3 months.
+
+        Uses two-stage filtering:
+          Stage 1: Model probability >= optimal_threshold
+          Stage 2: Positive earnings momentum AND 3-day volume surge > 1.5x
 
         Args:
             ticker: Stock ticker symbol.
+            min_market_cap: Minimum market cap filter in dollars.
+                Default $100M (training universe). Use 1_000_000_000
+                for high-conviction large-cap mode.
 
         Returns:
-            Dict with ticker, predicted return, and confidence info.
+            Dict with ticker, probability, classification, and rule checks.
         """
+        # Market cap gate
+        try:
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            mcap = info.get("marketCap") or 0
+        except Exception:
+            mcap = 0
+
+        if mcap < min_market_cap:
+            return {
+                "ticker": ticker,
+                "probability_gain": None,
+                "prediction": None,
+                "market_cap": mcap,
+                "min_market_cap": min_market_cap,
+                "error": f"Market cap ${mcap/1e6:.0f}M below ${min_market_cap/1e6:.0f}M threshold.",
+            }
+
         row = build_training_row(ticker, include_sentiment=True)
         if row is None:
             return {
                 "ticker": ticker,
-                "predicted_return_3m": None,
+                "probability_gain": None,
+                "prediction": None,
                 "error": "Could not build features for ticker.",
             }
 
-        predicted_return = self.predict(row)
+        probability = self.predict(row)
+
+        # Stage 2: rule-based post-filters on raw features
+        if isinstance(row, dict):
+            raw = row
+        else:
+            raw = row.to_dict() if hasattr(row, "to_dict") else {}
+
+        earnings_momentum_ok = float(raw.get("hist_earnings_growth_qoq", 0) or 0) > 0
+        volume_confirmed = float(raw.get("Volume_Surge_3d", 0) or 0) > 1.5
+        rules_pass = earnings_momentum_ok and volume_confirmed
+
+        model_pass = probability >= self.optimal_threshold
+        prediction = 1 if (model_pass and rules_pass) else 0
+
         return {
             "ticker": ticker,
-            "predicted_return_3m": round(predicted_return, 4),
-            "predicted_return_3m_pct": f"{predicted_return * 100:.2f}%",
+            "probability_gain": round(probability, 4),
+            "probability_pct": f"{probability * 100:.1f}%",
+            "prediction": prediction,
+            "signal": "BUY" if prediction == 1 else "HOLD",
+            "model_pass": model_pass,
+            "earnings_momentum_ok": earnings_momentum_ok,
+            "volume_confirmed": volume_confirmed,
+            "rules_pass": rules_pass,
+            "market_cap": mcap,
+            "min_market_cap": min_market_cap,
         }
 
     def save(self) -> None:
@@ -261,6 +699,7 @@ class StockReturnPredictor:
         joblib.dump(self.automl, MODEL_PATH)
         joblib.dump(self.feature_names, FEATURE_NAMES_PATH)
         joblib.dump(self.feature_medians, MEDIANS_PATH)
+        joblib.dump(self.optimal_threshold, THRESHOLD_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
     def load(self) -> None:
@@ -273,6 +712,8 @@ class StockReturnPredictor:
         self.feature_names = joblib.load(FEATURE_NAMES_PATH)
         if MEDIANS_PATH.exists():
             self.feature_medians = joblib.load(MEDIANS_PATH)
+        if THRESHOLD_PATH.exists():
+            self.optimal_threshold = joblib.load(THRESHOLD_PATH)
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 

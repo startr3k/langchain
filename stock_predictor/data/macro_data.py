@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MACRO_FEATURES = [
     "vix_close",
     "treasury_10y",
+    "treasury_3m",
     "yield_curve_spread",
     "sp500_return_20d",
     "sp500_return_60d",
@@ -94,12 +95,12 @@ def get_macro_data(period: str = "6y") -> pd.DataFrame:
         result["treasury_10y"] = np.nan
 
     if "^IRX" in merged.columns:
-        result["treasury_2y"] = merged["^IRX"]
+        result["treasury_3m"] = merged["^IRX"]
     else:
-        result["treasury_2y"] = np.nan
+        result["treasury_3m"] = np.nan
 
     # Yield curve spread (10y - 2y)
-    result["yield_curve_spread"] = result["treasury_10y"] - result["treasury_2y"]
+    result["yield_curve_spread"] = result["treasury_10y"] - result["treasury_3m"]
 
     # S&P 500 momentum and volatility
     if "^GSPC" in merged.columns:

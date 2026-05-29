@@ -1,7 +1,8 @@
-"""Social media sentiment analysis for stocks.
+"""Social media and earnings call sentiment analysis for stocks.
 
 Aggregates sentiment signals from Reddit (via old.reddit.com scraping),
-Finviz news, and StockTwits to generate sentiment features for stock prediction.
+Finviz news, StockTwits, and earnings call transcripts (via DuckDuckGo +
+web scraping) to generate sentiment features for stock prediction.
 """
 
 from __future__ import annotations
@@ -272,18 +273,26 @@ def fetch_stocktwits_sentiment(ticker: str) -> list[dict]:
 def get_sentiment_features(ticker: str) -> dict:
     """Aggregate sentiment from all sources into model-ready features.
 
+    Sources: Reddit, Finviz news, StockTwits, and earnings call transcripts.
+
     Args:
         ticker: Stock ticker symbol.
 
     Returns:
-        Dictionary of aggregated sentiment features.
+        Dictionary of aggregated sentiment features including source texts.
     """
+    from stock_predictor.data.earnings_transcript import fetch_earnings_transcript
+
     reddit_posts = fetch_reddit_sentiment(ticker)
     finviz_news = fetch_finviz_sentiment(ticker)
     stocktwits_msgs = fetch_stocktwits_sentiment(ticker)
+    transcript_data = fetch_earnings_transcript(ticker)
 
     all_polarities: list[float] = []
     all_subjectivities: list[float] = []
+
+    # Collect source texts for display: (source, text, polarity)
+    source_texts: list[tuple[str, str, float]] = []
 
     reddit_polarities: list[float] = []
     reddit_scores: list[float] = []
@@ -295,12 +304,22 @@ def get_sentiment_features(ticker: str) -> dict:
         reddit_polarities.append(post["polarity"])
         reddit_scores.append(post["score"])
         reddit_comments.append(post["num_comments"])
+        source_texts.append((
+            "Reddit",
+            post.get("title", post.get("text", ""))[:200],
+            round(post["polarity"], 3),
+        ))
 
     finviz_polarities: list[float] = []
     for item in finviz_news:
         all_polarities.append(item["polarity"])
         all_subjectivities.append(item["subjectivity"])
         finviz_polarities.append(item["polarity"])
+        source_texts.append((
+            "Finviz News",
+            item.get("title", item.get("text", ""))[:200],
+            round(item["polarity"], 3),
+        ))
 
     stocktwits_polarities: list[float] = []
     stocktwits_bullish = 0
@@ -313,6 +332,19 @@ def get_sentiment_features(ticker: str) -> dict:
             stocktwits_bullish += 1
         elif msg.get("stocktwits_sentiment") == "Bearish":
             stocktwits_bearish += 1
+        source_texts.append((
+            "StockTwits",
+            msg.get("body", msg.get("text", ""))[:200],
+            round(msg["polarity"], 3),
+        ))
+
+    # Earnings call transcript sentiment
+    transcript_polarity = transcript_data.get("transcript_polarity")
+    if transcript_polarity is not None:
+        all_polarities.append(transcript_polarity)
+    # Add transcript source texts for display
+    for src_text in transcript_data.get("transcript_source_texts", []):
+        source_texts.append(src_text)
 
     features = {
         # Overall sentiment
@@ -338,6 +370,13 @@ def get_sentiment_features(ticker: str) -> dict:
         "stocktwits_bull_bear_ratio": (
             stocktwits_bullish / max(stocktwits_bearish, 1)
         ),
+        # Earnings call transcript
+        "transcript_sentiment": transcript_data.get("transcript_sentiment"),
+        "transcript_polarity": transcript_data.get("transcript_polarity"),
+        "transcript_url": transcript_data.get("transcript_url"),
+        "transcript_date": transcript_data.get("transcript_date"),
+        # All source texts for display
+        "source_texts": source_texts,
     }
 
     return features
@@ -368,8 +407,11 @@ def get_sentiment_summary(ticker: str, features: dict | None = None) -> str:
     else:
         overall = "Strongly Negative"
 
+    transcript_sent = features.get("transcript_sentiment")
+    transcript_url = features.get("transcript_url")
+
     lines = [
-        f"=== Social Media Sentiment for {ticker} ===",
+        f"=== Sentiment for {ticker} ===",
         f"Overall Sentiment: {overall} (polarity={polarity:.3f})",
         f"Total mentions across sources: {features['sentiment_total_mentions']}",
         "",
@@ -382,6 +424,8 @@ def get_sentiment_summary(ticker: str, features: dict | None = None) -> str:
         f"bullish={features['stocktwits_bullish_count']}, "
         f"bearish={features['stocktwits_bearish_count']}, "
         f"bull/bear ratio={features['stocktwits_bull_bear_ratio']:.2f}",
+        f"Earnings Call: sentiment={transcript_sent if transcript_sent is not None else 'N/A'}"
+        + (f", url={transcript_url}" if transcript_url else ""),
     ]
     return "\n".join(lines)
 

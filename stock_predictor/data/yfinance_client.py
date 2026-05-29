@@ -79,6 +79,16 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["Price_to_SMA_50"] = df["Close"] / df["SMA_50"]
     df["Price_to_SMA_200"] = df["Close"] / df["SMA_200"]
 
+    # SMA 200 cross signal: detect when price crosses the 200-day MA
+    above_sma200 = (df["Close"] > df["SMA_200"]).astype(int)
+    cross = above_sma200.diff()
+    # +1 = bullish cross (price moved above), -1 = bearish cross (below)
+    df["SMA_200_Cross"] = cross.fillna(0)
+    # Days since last cross event
+    cross_occurred = cross.abs() > 0
+    cross_groups = cross_occurred.cumsum()
+    df["Days_Since_SMA200_Cross"] = cross_groups.groupby(cross_groups).cumcount()
+
     # Volatility
     df["Volatility_20d"] = df["Return_1d"].rolling(window=20).std()
     df["Volatility_60d"] = df["Return_1d"].rolling(window=60).std()
@@ -86,6 +96,10 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # Volume features
     df["Volume_SMA_20"] = df["Volume"].rolling(window=20).mean()
     df["Volume_Ratio"] = df["Volume"] / df["Volume_SMA_20"]
+    # 3-day volume surge: avg volume over last 3 days / 20-day avg
+    df["Volume_Surge_3d"] = (
+        df["Volume"].rolling(window=3).mean() / df["Volume_SMA_20"]
+    )
 
     # RSI
     delta = df["Close"].diff()
@@ -99,9 +113,11 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # MACD
     ema_12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema_26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema_12 - ema_26
-    df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
+    # Normalize MACD by price so it's comparable across stocks
+    df["MACD"] = (ema_12 - ema_26) / df["Close"]
+    macd_signal = df["MACD"].ewm(span=9, adjust=False).mean()
+    df["MACD_Signal"] = macd_signal
+    df["MACD_Hist"] = df["MACD"] - macd_signal
 
     # Bollinger Bands
     bb_sma = df["Close"].rolling(window=20).mean()
@@ -132,6 +148,43 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     df["Volume_Spike_Magnitude"] = (
         (df["Volume"] - vol_mean) / vol_std.replace(0, np.nan)
     )
+
+    # --- Engineered breakout features ---
+
+    # 1. Volatility contraction ratio: low short-term vol relative to
+    #    long-term vol signals compression before a breakout.
+    df["Volatility_Contraction"] = df["Volatility_20d"] / df["Volatility_60d"].replace(0, np.nan)
+
+    # 2. Momentum acceleration: difference between short-term and
+    #    medium-term returns — captures accelerating moves.
+    df["Momentum_Accel"] = df["Return_5d"] - df["Return_20d"]
+
+    # 3. Volume-price confirmation: positive returns on high volume
+    #    signal conviction behind the move.
+    df["Volume_Price_Confirm"] = df["Return_5d"] * df["Volume_Ratio"]
+
+    # 4. Distance from 52-week high and low (normalised 0-1).
+    high_252 = df["Close"].rolling(window=252, min_periods=63).max()
+    low_252 = df["Close"].rolling(window=252, min_periods=63).min()
+    df["Dist_52w_High"] = df["Close"] / high_252.replace(0, np.nan)
+    df["Dist_52w_Low"] = df["Close"] / low_252.replace(0, np.nan)
+
+    # 5. BB squeeze duration: consecutive days BB_Width is below its
+    #    20-day average — longer squeezes precede bigger breakouts.
+    bb_width_avg = df["BB_Width"].rolling(window=20).mean()
+    squeeze = (df["BB_Width"] < bb_width_avg).astype(int)
+    # Count consecutive squeeze days (resets on non-squeeze)
+    squeeze_groups = (squeeze != squeeze.shift()).cumsum()
+    df["BB_Squeeze_Duration"] = squeeze.groupby(squeeze_groups).cumcount()
+    df.loc[squeeze == 0, "BB_Squeeze_Duration"] = 0
+
+    # 6. RSI divergence: price makes new 14-day low but RSI doesn't.
+    #    Positive value = bullish divergence (reversal signal).
+    price_14d_low = df["Close"].rolling(window=14).min()
+    rsi_14d_low = df["RSI_14"].rolling(window=14).min()
+    price_at_new_low = df["Close"] <= price_14d_low * 1.001
+    rsi_higher = df["RSI_14"] > rsi_14d_low + 2
+    df["RSI_Divergence"] = (price_at_new_low & rsi_higher).astype(float)
 
     return df
 

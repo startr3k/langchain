@@ -9,10 +9,11 @@ yfinance>=0.2.40
 pandas>=2.2.0
 numpy>=1.26.0
 
-# Social Media Sentiment
+# Social Media & Earnings Call Sentiment
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 textblob>=0.18.0
+ddgs>=7.0.0
 
 # Historical Data Sources
 fredapi>=0.5.0

@@ -10,12 +10,14 @@ Data sources:
 4. Earnings surprise history (YFinance earnings_dates)
 5. Google Trends (historical search interest)
 6. SEC EDGAR XBRL (historical regulatory filings)
+7. Short interest (yfinance — cross-sectional snapshot)
+8. Options flow (yfinance option chains — cross-sectional snapshot)
+9. Insider transactions (SEC Form 4 — time-aligned filing dates)
+10. Reddit historical sentiment (Arctic Shift — time-aligned posts)
 
 Excluded from model (data leakage risk):
 - Current-snapshot fundamentals: today's values applied to all historical
   rows causes look-ahead bias.  Kept in agent/UI output only.
-- Sentiment: today's news headlines applied uniformly to historical rows.
-  Kept in agent/UI output only.
 """
 
 from __future__ import annotations
@@ -51,6 +53,22 @@ from stock_predictor.data.sec_edgar import (
     align_sec_to_dates,
     get_sec_filings,
 )
+from stock_predictor.data.short_interest import (
+    SHORT_INTEREST_FEATURES,
+    align_short_interest_to_dates,
+)
+from stock_predictor.data.options_flow import (
+    OPTIONS_FLOW_FEATURES,
+    align_options_flow_to_dates,
+)
+from stock_predictor.data.insider_transactions import (
+    INSIDER_FEATURES,
+    align_insider_to_dates,
+)
+from stock_predictor.data.reddit_sentiment import (
+    REDDIT_SENTIMENT_FEATURES,
+    align_reddit_sentiment_to_dates,
+)
 from stock_predictor.data.sentiment import get_sentiment_features
 from stock_predictor.data.yfinance_client import (
     compute_technical_features,
@@ -64,14 +82,24 @@ logger = logging.getLogger(__name__)
 
 TECHNICAL_FEATURES = [
     "Return_1d", "Return_5d", "Return_20d", "Return_60d",
-    "SMA_20", "SMA_50", "SMA_200",
-    "EMA_200",
+    # Normalized price-relative ratios (not raw dollar values)
     "Price_to_SMA_20", "Price_to_SMA_50", "Price_to_SMA_200",
+    # SMA 200 cross signal (duration only — daily cross event dropped)
+    "Days_Since_SMA200_Cross",
     "Volatility_20d", "Volatility_60d",
-    "Volume_Ratio", "Volume_Spike", "Volume_Spike_Magnitude",
+    # Breakout-engineered features
+    "Volatility_Contraction", "Momentum_Accel",
+    "Volume_Price_Confirm", "Dist_52w_High", "Dist_52w_Low",
+    "BB_Squeeze_Duration",
+    "Volume_Ratio", "Volume_Surge_3d", "Volume_Spike_Magnitude",
     "RSI_14", "MACD", "MACD_Hist",
     "BB_Width", "BB_Position",
-    "OBV",
+]
+
+# Interaction / derived features computed during training preprocessing.
+# These combine existing features to capture multi-factor signals.
+DERIVED_FEATURES = [
+    "Fundamental_Surprise",    # revenue growth × earnings surprise
 ]
 
 # Current-snapshot fundamentals — EXCLUDED from model training/prediction
@@ -124,9 +152,14 @@ ALL_FEATURE_NAMES = (
     + MACRO_FEATURES
     + EARNINGS_FEATURES
     + SEC_FEATURES
+    + SHORT_INTEREST_FEATURES
+    + OPTIONS_FLOW_FEATURES
+    + INSIDER_FEATURES
+    + REDDIT_SENTIMENT_FEATURES
+    + DERIVED_FEATURES
 )
 
-TARGET_COLUMN = "Forward_Return_3M"
+TARGET_COLUMN = "Forward_Max_Return_3M"
 
 
 def build_training_row(
@@ -196,6 +229,27 @@ def build_training_row(
             for col in SEC_FEATURES:
                 row[col] = aligned[col].iloc[0] if col in aligned.columns else np.nan
 
+        # Short interest (current snapshot — cross-sectional)
+        si = align_short_interest_to_dates(ticker, pd.DatetimeIndex([pd.Timestamp.now().normalize()]))
+        for col in SHORT_INTEREST_FEATURES:
+            row[col] = si[col].iloc[0] if col in si.columns else np.nan
+
+        # Options flow (current snapshot — cross-sectional)
+        of = align_options_flow_to_dates(ticker, pd.DatetimeIndex([pd.Timestamp.now().normalize()]))
+        for col in OPTIONS_FLOW_FEATURES:
+            row[col] = of[col].iloc[0] if col in of.columns else np.nan
+
+        # Insider transactions (time-aligned from SEC Form 4)
+        today = pd.Timestamp.now().normalize()
+        ins = align_insider_to_dates(ticker, pd.DatetimeIndex([today]))
+        for col in INSIDER_FEATURES:
+            row[col] = ins[col].iloc[0] if col in ins.columns else np.nan
+
+        # Reddit historical sentiment (time-aligned from Arctic Shift)
+        reddit = align_reddit_sentiment_to_dates(ticker, pd.DatetimeIndex([today]))
+        for col in REDDIT_SENTIMENT_FEATURES:
+            row[col] = reddit[col].iloc[0] if col in reddit.columns else np.nan
+
         return row
     except Exception:
         logger.exception("Error building feature row for %s", ticker)
@@ -250,14 +304,28 @@ def build_training_dataset(
 
             df = compute_technical_features(df)
 
-            # Compute 3-month forward return (~63 trading days)
-            df[TARGET_COLUMN] = df["Close"].shift(-63) / df["Close"] - 1
+            # Compute max forward return within 3-month window (~63 trading days).
+            # For each day, find the highest Close price in the next 63 days
+            # and compute the return from today's Close to that peak.
+            rolling_max = (
+                df["Close"]
+                .iloc[::-1]
+                .rolling(window=63, min_periods=1)
+                .max()
+                .iloc[::-1]
+            )
+            df[TARGET_COLUMN] = rolling_max / df["Close"] - 1
+            # NaN out the last 63 rows (incomplete forward window)
+            df.loc[df.index[-63:], TARGET_COLUMN] = np.nan
 
             # --- Fetch historical data sources for this ticker ---
             hist_fund = get_historical_fundamentals(ticker)
             earnings_df = get_earnings_history(ticker)
             trends_df = get_google_trends(ticker)
             sec_df = get_sec_filings(ticker)
+            # New data sources — may return empty if API is unavailable
+            # Short interest & options flow are cross-sectional snapshots
+            # Insider transactions & Reddit sentiment are time-aligned
 
             # Filter valid rows
             valid_mask = df[TARGET_COLUMN].notna() & df["SMA_200"].notna()
@@ -291,6 +359,10 @@ def build_training_dataset(
             aligned_trends = align_trends_to_dates(trends_df, sample_dates)
             aligned_sec = align_sec_to_dates(sec_df, sample_dates)
             aligned_macro = align_macro_to_dates(macro_df, sample_dates)
+            aligned_si = align_short_interest_to_dates(ticker, sample_dates)
+            aligned_of = align_options_flow_to_dates(ticker, sample_dates)
+            aligned_ins = align_insider_to_dates(ticker, sample_dates)
+            aligned_reddit = align_reddit_sentiment_to_dates(ticker, sample_dates)
 
             for i, (idx, row) in enumerate(sampled.iterrows()):
                 data_point: dict = {"Ticker": ticker}
@@ -340,6 +412,38 @@ def build_training_dataset(
                     data_point[col] = (
                         aligned_sec[col].iloc[i]
                         if col in aligned_sec.columns
+                        else np.nan
+                    )
+
+                # Short interest (cross-sectional snapshot)
+                for col in SHORT_INTEREST_FEATURES:
+                    data_point[col] = (
+                        aligned_si[col].iloc[i]
+                        if col in aligned_si.columns
+                        else np.nan
+                    )
+
+                # Options flow (cross-sectional snapshot)
+                for col in OPTIONS_FLOW_FEATURES:
+                    data_point[col] = (
+                        aligned_of[col].iloc[i]
+                        if col in aligned_of.columns
+                        else np.nan
+                    )
+
+                # Insider transactions (time-aligned, no leakage)
+                for col in INSIDER_FEATURES:
+                    data_point[col] = (
+                        aligned_ins[col].iloc[i]
+                        if col in aligned_ins.columns
+                        else np.nan
+                    )
+
+                # Reddit historical sentiment (time-aligned, no leakage)
+                for col in REDDIT_SENTIMENT_FEATURES:
+                    data_point[col] = (
+                        aligned_reddit[col].iloc[i]
+                        if col in aligned_reddit.columns
                         else np.nan
                     )
 
