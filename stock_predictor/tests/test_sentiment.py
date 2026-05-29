@@ -115,10 +115,11 @@ class TestFetchStockTwitsSentiment:
 
 
 class TestGetSentimentFeatures:
+    @patch("stock_predictor.data.earnings_transcript.fetch_earnings_transcript")
     @patch("stock_predictor.data.sentiment.fetch_stocktwits_sentiment")
     @patch("stock_predictor.data.sentiment.fetch_finviz_sentiment")
     @patch("stock_predictor.data.sentiment.fetch_reddit_sentiment")
-    def test_aggregates_features(self, mock_reddit, mock_finviz, mock_stocktwits):
+    def test_aggregates_features(self, mock_reddit, mock_finviz, mock_stocktwits, mock_transcript):
         mock_reddit.return_value = [
             {"polarity": 0.5, "subjectivity": 0.7, "score": 100, "num_comments": 50},
             {"polarity": -0.1, "subjectivity": 0.4, "score": 20, "num_comments": 10},
@@ -130,6 +131,14 @@ class TestGetSentimentFeatures:
             {"polarity": 0.2, "subjectivity": 0.6, "stocktwits_sentiment": "Bullish"},
             {"polarity": -0.3, "subjectivity": 0.8, "stocktwits_sentiment": "Bearish"},
         ]
+        mock_transcript.return_value = {
+            "transcript_sentiment": 0.1,
+            "transcript_polarity": 0.05,
+            "transcript_url": "https://example.com",
+            "transcript_date": "2025-01-30",
+            "transcript_text_preview": "Test transcript",
+            "transcript_source_texts": [("Earnings Call", "test", 0.05)],
+        }
 
         features = get_sentiment_features("AAPL")
         assert "sentiment_mean_polarity" in features
@@ -139,19 +148,32 @@ class TestGetSentimentFeatures:
         assert features["stocktwits_mention_count"] == 2
         assert features["stocktwits_bullish_count"] == 1
         assert features["stocktwits_bearish_count"] == 1
-        assert features["sentiment_total_mentions"] == 5
+        assert features["sentiment_total_mentions"] == 6
+        assert features["transcript_sentiment"] == 0.1
+        assert features["transcript_polarity"] == 0.05
+        assert "source_texts" in features
 
+    @patch("stock_predictor.data.earnings_transcript.fetch_earnings_transcript")
     @patch("stock_predictor.data.sentiment.fetch_stocktwits_sentiment")
     @patch("stock_predictor.data.sentiment.fetch_finviz_sentiment")
     @patch("stock_predictor.data.sentiment.fetch_reddit_sentiment")
-    def test_handles_empty_data(self, mock_reddit, mock_finviz, mock_stocktwits):
+    def test_handles_empty_data(self, mock_reddit, mock_finviz, mock_stocktwits, mock_transcript):
         mock_reddit.return_value = []
         mock_finviz.return_value = []
         mock_stocktwits.return_value = []
+        mock_transcript.return_value = {
+            "transcript_sentiment": None,
+            "transcript_polarity": None,
+            "transcript_url": None,
+            "transcript_date": None,
+            "transcript_text_preview": None,
+            "transcript_source_texts": [],
+        }
 
         features = get_sentiment_features("XXXX")
         assert features["sentiment_mean_polarity"] == 0.0
         assert features["sentiment_total_mentions"] == 0
+        assert features["transcript_sentiment"] is None
 
 
 class TestGetSentimentSummary:
@@ -169,9 +191,12 @@ class TestGetSentimentSummary:
             "stocktwits_bullish_count": 10,
             "stocktwits_bearish_count": 3,
             "stocktwits_bull_bear_ratio": 3.33,
+            "transcript_sentiment": 0.1,
+            "transcript_url": "https://example.com",
         }
         summary = get_sentiment_summary("NVDA")
         assert "Strongly Positive" in summary
+        assert "Earnings Call" in summary
         assert "NVDA" in summary
 
 

@@ -165,6 +165,8 @@ if page == "Top Recommendations":
             stocktwits_bull = sent_feats.get("stocktwits_bullish_count", 0)
             stocktwits_bear = sent_feats.get("stocktwits_bearish_count", 0)
             bull_bear_ratio = sent_feats.get("stocktwits_bull_bear_ratio", 1.0)
+            transcript_sent = sent_feats.get("transcript_sentiment")
+            transcript_url = sent_feats.get("transcript_url")
 
             # Normalize sentiment polarity from [-1, 1] to [0, 1]
             sentiment_score = (mean_polarity + 1.0) / 2.0
@@ -182,6 +184,9 @@ if page == "Top Recommendations":
                 "Total Mentions": total_mentions,
                 "Reddit Mentions": reddit_count,
                 "StockTwits Bull/Bear": f"{stocktwits_bull}/{stocktwits_bear}",
+                "Transcript Sentiment": f"{transcript_sent:+.3f}" if transcript_sent is not None else "N/A",
+                "_source_texts": sent_feats.get("source_texts", []),
+                "_transcript_url": transcript_url,
             })
 
         progress_bar.empty()
@@ -201,7 +206,11 @@ if page == "Top Recommendations":
             f"{sentiment_weight:.0%} × Sentiment Score"
         )
 
-        df = pd.DataFrame(top_results)
+        display_top = [
+            {k: v for k, v in r.items() if not k.startswith("_")}
+            for r in top_results
+        ]
+        df = pd.DataFrame(display_top)
         st.dataframe(
             df.style.format({
                 "Model P(≥20%)": "{:.1%}",
@@ -212,6 +221,47 @@ if page == "Top Recommendations":
             use_container_width=True,
             hide_index=True,
         )
+
+        # Detailed view for each top pick with source texts
+        st.subheader("Sentiment Details")
+        for r in top_results:
+            ticker_name = r["Ticker"]
+            model_p = r["Model P(≥20%)"]
+            comp = r["Composite Score"]
+            source_texts = r.get("_source_texts", [])
+            transcript_url = r.get("_transcript_url")
+
+            with st.expander(
+                f"**{ticker_name}** — Composite: {comp:.1%} | "
+                f"Model: {model_p:.1%} | "
+                f"Transcript: {r.get('Transcript Sentiment', 'N/A')}"
+            ):
+                # Summary metrics
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Model P(≥20%)", f"{model_p:.1%}")
+                col2.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
+                col3.metric("Mentions", r["Total Mentions"])
+                col4.metric("Composite", f"{comp:.1%}")
+
+                if transcript_url:
+                    st.markdown(f"[View Full Transcript]({transcript_url})")
+
+                if source_texts:
+                    st.markdown("---")
+                    st.markdown("**Source Texts & Sentiments**")
+                    for source, text, polarity in source_texts:
+                        if polarity > 0.05:
+                            emoji = ":green[Positive]"
+                        elif polarity < -0.05:
+                            emoji = ":red[Negative]"
+                        else:
+                            emoji = ":gray[Neutral]"
+                        st.markdown(
+                            f"**{source}** ({emoji}, polarity: {polarity:+.3f})"
+                        )
+                        st.caption(text[:300])
+                else:
+                    st.info("No source texts available for this ticker.")
 
         # Highlight top picks
         buy_picks = [r for r in top_results if r["Signal"] == "BUY"]
@@ -230,9 +280,13 @@ if page == "Top Recommendations":
                     f"Composite: {comp:.1%}"
                 )
 
-        # Show all results table
+        # Show all results table (exclude internal fields)
         with st.expander(f"All {len(results)} scanned stocks"):
-            all_df = pd.DataFrame(results)
+            display_results = [
+                {k: v for k, v in r.items() if not k.startswith("_")}
+                for r in results
+            ]
+            all_df = pd.DataFrame(display_results)
             st.dataframe(
                 all_df.style.format({
                     "Model P(≥20%)": "{:.1%}",

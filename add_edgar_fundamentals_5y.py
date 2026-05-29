@@ -34,27 +34,56 @@ CHECKPOINT_FILE = "edgar_fund_checkpoint.csv"
 PROGRESS_FILE = "edgar_fund_progress.txt"
 OUTPUT_FILE = "training_data_5y_full.csv"
 
-# XBRL concepts to extract
+# XBRL concepts to extract.
+# Multiple tag variants per concept — verified against EDGAR API for
+# AAPL, AMZN, GOOG, META, NFLX, AAON, and 30+ NaN-producing tickers.
 CONCEPTS = {
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
         "SalesRevenueNet",
+        "SalesRevenueGoodsNet",
         "Revenues",
+        # Banks / financial companies use interest income as primary revenue
+        "InterestIncomeExpenseNet",
+        "InterestAndDividendIncomeOperating",
     ],
-    "net_income": ["NetIncomeLoss"],
-    "eps_diluted": ["EarningsPerShareDiluted"],
-    "operating_income": ["OperatingIncomeLoss"],
+    "net_income": [
+        "NetIncomeLoss",
+        "ProfitLoss",
+    ],
+    "eps_diluted": [
+        "EarningsPerShareDiluted",
+        "EarningsPerShareBasicAndDiluted",
+    ],
+    "operating_income": [
+        "OperatingIncomeLoss",
+        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    ],
     "total_assets": ["Assets"],
-    "total_liabilities": ["Liabilities"],
-    "stockholders_equity": ["StockholdersEquity"],
+    "total_liabilities": [
+        "Liabilities",
+        "LiabilitiesAndStockholdersEquity",
+    ],
+    "stockholders_equity": [
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ],
     "current_assets": ["AssetsCurrent"],
     "current_liabilities": ["LiabilitiesCurrent"],
-    "long_term_debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
+    "long_term_debt": [
+        "LongTermDebtNoncurrent",
+        "LongTermDebt",
+        "LongTermDebtAndCapitalLeaseObligations",
+    ],
     "operating_cash_flow": [
         "NetCashProvidedByUsedInOperatingActivities",
         "NetCashProvidedByOperatingActivities",
     ],
-    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
+    "capex": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "CapitalExpenditureDiscontinuedOperations",
+    ],
 }
 
 
