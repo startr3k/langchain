@@ -114,30 +114,14 @@ def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     These features combine multiple raw signals into higher-level
     indicators that capture multi-factor breakout patterns.
     """
-    # Earnings momentum: quarter-over-quarter EPS change
-    if "hist_earnings_growth_qoq" in df.columns:
-        df["Earnings_Momentum"] = df["hist_earnings_growth_qoq"]
-    else:
-        df["Earnings_Momentum"] = 0.0
-
-    # Fundamental surprise: companies beating estimates while growing
+    # Fundamental surprise: companies beating estimates while growing.
+    # Fill NaN with 0 (no surprise) instead of propagating NaN from parents.
     if "hist_revenue_growth_qoq" in df.columns and "earnings_surprise_pct" in df.columns:
         df["Fundamental_Surprise"] = (
-            df["hist_revenue_growth_qoq"] * df["earnings_surprise_pct"]
+            df["hist_revenue_growth_qoq"].fillna(0) * df["earnings_surprise_pct"].fillna(0)
         )
     else:
         df["Fundamental_Surprise"] = 0.0
-
-    # Excess return vs market (stock alpha relative to S&P 500)
-    if "Return_20d" in df.columns and "sp500_return_20d" in df.columns:
-        df["Excess_Return_20d"] = df["Return_20d"] - df["sp500_return_20d"]
-    else:
-        df["Excess_Return_20d"] = 0.0
-
-    if "Return_60d" in df.columns and "sp500_return_60d" in df.columns:
-        df["Excess_Return_60d"] = df["Return_60d"] - df["sp500_return_60d"]
-    else:
-        df["Excess_Return_60d"] = 0.0
 
     return df
 
@@ -232,6 +216,41 @@ class StockReturnPredictor:
 
         if df.empty:
             raise ValueError("Training dataset is empty — no valid data collected.")
+
+        # --- Quality filter: keep only stocks with revenue and earnings ---
+        # Removes shell companies, pre-revenue biotechs, and SPACs that
+        # contribute mostly NaN fundamental features.
+        # Skip for small datasets (e.g. tests) where filtering would
+        # remove all data.
+        before_filter = len(df)
+        if "Ticker" in df.columns and before_filter >= 500:
+            ticker_counts = df.groupby("Ticker").size()
+            tickers_2q = set(ticker_counts[ticker_counts >= 126].index)
+
+            if "hist_total_revenue" in df.columns:
+                has_rev = df.groupby("Ticker")["hist_total_revenue"].apply(
+                    lambda x: (x.notna() & (x > 0)).mean() > 0.5,
+                )
+                tickers_with_rev = set(has_rev[has_rev].index)
+            else:
+                tickers_with_rev = tickers_2q
+
+            if "earnings_eps_actual" in df.columns:
+                has_earn = df.groupby("Ticker")["earnings_eps_actual"].apply(
+                    lambda x: x.notna().mean() > 0.5,
+                )
+                tickers_with_earn = set(has_earn[has_earn].index)
+            else:
+                tickers_with_earn = tickers_2q
+
+            quality_tickers = tickers_2q & tickers_with_rev & tickers_with_earn
+            df = df[df["Ticker"].isin(quality_tickers)]
+            logger.info(
+                "Quality filter: %d → %d rows (%d tickers kept, %d removed)",
+                before_filter, len(df),
+                len(quality_tickers),
+                before_filter - len(df),
+            )
 
         # Compute derived interaction features before selecting columns
         df = _compute_derived_features(df)
@@ -514,7 +533,7 @@ class StockReturnPredictor:
 
         # --- Two-stage evaluation (model + rules) on test set ---
         raw_X_test = raw_X.iloc[split_idx + gap_rows:]
-        em_col = raw_X_test.get("Earnings_Momentum", pd.Series(0.0, index=raw_X_test.index))
+        em_col = raw_X_test.get("hist_earnings_growth_qoq", pd.Series(0.0, index=raw_X_test.index))
         vr_col = raw_X_test.get("Volume_Ratio", pd.Series(0.0, index=raw_X_test.index))
         rules_mask = (em_col.fillna(0) > 0) & (vr_col.fillna(0) > 1.0)
 
@@ -656,7 +675,7 @@ class StockReturnPredictor:
         else:
             raw = row.to_dict() if hasattr(row, "to_dict") else {}
 
-        earnings_momentum_ok = float(raw.get("Earnings_Momentum", 0) or 0) > 0
+        earnings_momentum_ok = float(raw.get("hist_earnings_growth_qoq", 0) or 0) > 0
         volume_confirmed = float(raw.get("Volume_Ratio", 0) or 0) > 1.0
         rules_pass = earnings_momentum_ok and volume_confirmed
 
