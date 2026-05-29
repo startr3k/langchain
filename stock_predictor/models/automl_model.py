@@ -1,7 +1,9 @@
 """AutoML model for stock return classification using FLAML.
 
-Predicts whether a stock will achieve >=30% peak return at any point
-within a 3-month window.  FLAML (Fast Lightweight AutoML) automatically
+Predicts whether a stock will achieve >=20% peak return at any point
+within a 3-month window.  Uses a two-stage approach: Stage 1 is the
+AutoML model, Stage 2 applies rule-based post-filters (positive
+earnings momentum and volume confirmation) to boost precision.  FLAML (Fast Lightweight AutoML) automatically
 selects the best model and hyperparameters from XGBoost, LightGBM, etc.
 """
 
@@ -182,15 +184,18 @@ THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
 
 
 # Classification threshold: predict class 1 when the stock achieves
-# >=30% peak return at any point within the 3-month forward window.
-CLASSIFICATION_THRESHOLD = 0.30
+# >=20% peak return at any point within the 3-month forward window.
+CLASSIFICATION_THRESHOLD = 0.20
 
 
 class StockReturnPredictor:
     """AutoML-based stock return classifier.
 
-    Predicts class 1 (>=30% peak return within 3 months) vs class 0.
-    Uses class weights to handle class imbalance and AUC as metric.
+    Predicts class 1 (>=20% peak return within 3 months) vs class 0.
+    Uses balanced class weights and Average Precision as metric.
+    Two-stage prediction: model probability + rule-based post-filters
+    (positive earnings momentum and above-average volume) for higher
+    precision.
     """
 
     def __init__(self) -> None:
@@ -244,7 +249,7 @@ class StockReturnPredictor:
         y = y[valid]
 
         # Convert continuous return to binary classification target:
-        # 1 = return >= 30%, 0 = otherwise
+        # 1 = return >= threshold, 0 = otherwise
         y_binary = (y >= CLASSIFICATION_THRESHOLD).astype(int)
         n_pos = int(y_binary.sum())
         n_neg = len(y_binary) - n_pos
@@ -255,14 +260,21 @@ class StockReturnPredictor:
         )
         y = y_binary
 
-        # Compute class weights — use sqrt to moderate the imbalance
-        # correction.  Full inverse-frequency (n_neg/n_pos ≈ 2.76) pushes
-        # the model too hard toward recall; sqrt gives ~1.66x which
-        # balances precision and recall more evenly.
-        weight_neg = 1.0
-        weight_pos = float(np.sqrt(n_neg / max(n_pos, 1)))
+        # Compute balanced class weights: each class is weighted
+        # inversely proportional to its frequency so that both classes
+        # contribute equally to the loss.  This is equivalent to
+        # sklearn's class_weight="balanced":
+        #   weight_k = n_samples / (n_classes * n_k)
+        n_total = n_pos + n_neg
+        weight_neg = n_total / (2.0 * n_neg)
+        weight_pos = n_total / (2.0 * n_pos)
         sample_weight = y.map({0: weight_neg, 1: weight_pos}).values
-        logger.info("Class weight for positives: %.2f", weight_pos)
+        logger.info(
+            "Balanced class weights: neg=%.3f, pos=%.3f", weight_neg, weight_pos,
+        )
+
+        # Save raw features before transforms for two-stage rule evaluation
+        raw_X = X.copy()
 
         # Semantically fill profit-related NaN values: these are NaN
         # because the company is unprofitable, not because data is
@@ -290,6 +302,7 @@ class StockReturnPredictor:
             sort_order = date_series.sort_values().index
             X = X.loc[sort_order]
             y = y.loc[sort_order]
+            raw_X = raw_X.loc[sort_order]
 
         # Hold out the last 20% as a test set with a 63-day gap
         # (gap prevents overlapping forward-return windows from leaking)
@@ -419,23 +432,28 @@ class StockReturnPredictor:
             y_proba_pos = y_proba_test
 
         # --- Find optimal threshold that maximizes precision ---
-        # We require a minimum recall floor of 10% so the model still
-        # catches a meaningful number of winners.
-        MIN_RECALL = 0.10
+        # Require at least 100 predicted positives so the precision
+        # estimate is statistically meaningful (not based on a handful
+        # of samples).
+        MIN_PREDICTED_POS = 100
         prec_curve, rec_curve, thresholds = precision_recall_curve(
             y_test, y_proba_pos,
         )
         # precision_recall_curve returns len(thresholds) = len(prec) - 1
+        n_test = len(y_test)
         best_threshold = 0.5
         best_precision_at_thresh = 0.0
+        best_recall_at_thresh = 0.0
         for p, r, t in zip(prec_curve[:-1], rec_curve[:-1], thresholds):
-            if r >= MIN_RECALL and p > best_precision_at_thresh:
+            n_pred = int(r * y_test.sum() / max(p, 1e-9))
+            if n_pred >= MIN_PREDICTED_POS and p > best_precision_at_thresh:
                 best_precision_at_thresh = p
+                best_recall_at_thresh = r
                 best_threshold = float(t)
         self.optimal_threshold = best_threshold
         logger.info(
-            "Optimal threshold: %.4f (precision=%.4f at recall>=%.0f%%)",
-            best_threshold, best_precision_at_thresh, MIN_RECALL * 100,
+            "Optimal threshold: %.4f (precision=%.4f, recall=%.4f)",
+            best_threshold, best_precision_at_thresh, best_recall_at_thresh,
         )
 
         # Evaluate at default 0.5 and at optimal threshold
@@ -494,6 +512,27 @@ class StockReturnPredictor:
         # --- Gain chart data (decile-based cumulative gain) ---
         gain_chart_data = _compute_gain_chart(y_test.values, y_proba_pos)
 
+        # --- Two-stage evaluation (model + rules) on test set ---
+        raw_X_test = raw_X.iloc[split_idx + gap_rows:]
+        em_col = raw_X_test.get("Earnings_Momentum", pd.Series(0.0, index=raw_X_test.index))
+        vr_col = raw_X_test.get("Volume_Ratio", pd.Series(0.0, index=raw_X_test.index))
+        rules_mask = (em_col.fillna(0) > 0) & (vr_col.fillna(0) > 1.0)
+
+        y_pred_twostage = (y_pred_optimal.astype(bool) & rules_mask.values).astype(int)
+        n_ts = int(y_pred_twostage.sum())
+        if n_ts > 0:
+            precision_ts = precision_score(y_test, y_pred_twostage, zero_division=0)
+            recall_ts = recall_score(y_test, y_pred_twostage, zero_division=0)
+            f1_ts = f1_score(y_test, y_pred_twostage, zero_division=0)
+        else:
+            precision_ts = recall_ts = f1_ts = 0.0
+
+        logger.info(
+            "Two-stage (model@%.2f + rules): precision=%.4f recall=%.4f "
+            "n_predicted=%d",
+            self.optimal_threshold, precision_ts, recall_ts, n_ts,
+        )
+
         metrics = {
             "best_estimator": self.automl.best_estimator,
             "best_config": self.automl.best_config,
@@ -513,6 +552,11 @@ class StockReturnPredictor:
             "recall_optimal": round(recall_opt, 4),
             "f1_optimal": round(f1_opt, 4),
             "accuracy_optimal": round(accuracy_opt, 4),
+            # Two-stage metrics (model @ optimal threshold + rules)
+            "precision_twostage": round(precision_ts, 4),
+            "recall_twostage": round(recall_ts, 4),
+            "f1_twostage": round(f1_ts, 4),
+            "n_predicted_twostage": n_ts,
             # Ranking metrics
             "auc_roc": round(auc, 4),
             "avg_precision": round(ap, 4),
@@ -526,21 +570,23 @@ class StockReturnPredictor:
 
         logger.info(
             "Training complete. Best: %s | Test AUC=%.4f AP=%.4f | "
-            "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | LR AUC=%.4f",
+            "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | "
+            "TwoStage: prec=%.4f rec=%.4f n=%d | LR AUC=%.4f",
             self.automl.best_estimator, auc, ap,
-            self.optimal_threshold, precision_opt, recall_opt, lr_auc,
+            self.optimal_threshold, precision_opt, recall_opt,
+            precision_ts, recall_ts, n_ts, lr_auc,
         )
         self.save()
         return metrics
 
     def predict(self, features: dict | pd.DataFrame) -> float:
-        """Predict probability of >=30% peak return within 3 months.
+        """Predict probability of >=20% peak return within 3 months.
 
         Args:
             features: Feature dict or DataFrame row.
 
         Returns:
-            Probability of class 1 (>=30% peak return) as a float [0, 1].
+            Probability of class 1 (>=20% peak return) as a float [0, 1].
         """
         if not self.is_trained:
             self.load()
@@ -581,31 +627,52 @@ class StockReturnPredictor:
         return float(proba[0])
 
     def predict_ticker(self, ticker: str) -> dict:
-        """Predict whether a ticker will hit >=30% peak return within 3 months.
+        """Predict whether a ticker will hit >=20% peak return within 3 months.
+
+        Uses two-stage filtering:
+          Stage 1: Model probability >= optimal_threshold
+          Stage 2: Positive earnings momentum AND above-average volume
 
         Args:
             ticker: Stock ticker symbol.
 
         Returns:
-            Dict with ticker, probability, and classification.
+            Dict with ticker, probability, classification, and rule checks.
         """
         row = build_training_row(ticker, include_sentiment=True)
         if row is None:
             return {
                 "ticker": ticker,
-                "probability_30pct_gain": None,
+                "probability_gain": None,
                 "prediction": None,
                 "error": "Could not build features for ticker.",
             }
 
         probability = self.predict(row)
-        prediction = 1 if probability >= self.optimal_threshold else 0
+
+        # Stage 2: rule-based post-filters on raw features
+        if isinstance(row, dict):
+            raw = row
+        else:
+            raw = row.to_dict() if hasattr(row, "to_dict") else {}
+
+        earnings_momentum_ok = float(raw.get("Earnings_Momentum", 0) or 0) > 0
+        volume_confirmed = float(raw.get("Volume_Ratio", 0) or 0) > 1.0
+        rules_pass = earnings_momentum_ok and volume_confirmed
+
+        model_pass = probability >= self.optimal_threshold
+        prediction = 1 if (model_pass and rules_pass) else 0
+
         return {
             "ticker": ticker,
-            "probability_30pct_gain": round(probability, 4),
+            "probability_gain": round(probability, 4),
             "probability_pct": f"{probability * 100:.1f}%",
             "prediction": prediction,
             "signal": "BUY" if prediction == 1 else "HOLD",
+            "model_pass": model_pass,
+            "earnings_momentum_ok": earnings_momentum_ok,
+            "volume_confirmed": volume_confirmed,
+            "rules_pass": rules_pass,
         }
 
     def save(self) -> None:

@@ -84,7 +84,7 @@ page = st.sidebar.radio(
 if page == "Top Recommendations":
     st.title("Top Stock Recommendations")
     st.markdown(
-        "Combines **model probability** (P(≥30% peak gain in 3 months)) with "
+        "Combines **model probability** (P(≥20% peak gain in 3 months)) with "
         "**live sentiment** from Reddit, Finviz, and StockTwits to produce a "
         "composite score ranking."
     )
@@ -147,7 +147,7 @@ if page == "Top Recommendations":
 
             # Model prediction
             pred = predictor.predict_ticker(ticker)
-            prob = pred.get("probability_30pct_gain")
+            prob = pred.get("probability_gain")
             if prob is None:
                 continue
 
@@ -173,7 +173,7 @@ if page == "Top Recommendations":
 
             results.append({
                 "Ticker": ticker,
-                "Model P(≥30%)": round(prob, 4),
+                "Model P(≥20%)": round(prob, 4),
                 "Sentiment Score": round(sentiment_score, 4),
                 "Composite Score": round(composite, 4),
                 "Signal": pred.get("signal", "HOLD"),
@@ -203,7 +203,7 @@ if page == "Top Recommendations":
         df = pd.DataFrame(top_results)
         st.dataframe(
             df.style.format({
-                "Model P(≥30%)": "{:.1%}",
+                "Model P(≥20%)": "{:.1%}",
                 "Sentiment Score": "{:.1%}",
                 "Composite Score": "{:.1%}",
                 "Sentiment Polarity": "{:+.3f}",
@@ -217,7 +217,7 @@ if page == "Top Recommendations":
         if buy_picks:
             st.success(f"**{len(buy_picks)} BUY signals** in top {len(top_results)}:")
             for r in buy_picks:
-                model_p = r["Model P(≥30%)"]
+                model_p = r["Model P(≥20%)"]
                 sent_p = r["Sentiment Polarity"]
                 mentions = r["Total Mentions"]
                 comp = r["Composite Score"]
@@ -234,7 +234,7 @@ if page == "Top Recommendations":
             all_df = pd.DataFrame(results)
             st.dataframe(
                 all_df.style.format({
-                    "Model P(≥30%)": "{:.1%}",
+                    "Model P(≥20%)": "{:.1%}",
                     "Sentiment Score": "{:.1%}",
                     "Composite Score": "{:.1%}",
                     "Sentiment Polarity": "{:+.3f}",
@@ -387,12 +387,12 @@ elif page == "Stock Analysis":
                 predictor = StockReturnPredictor()
                 predictor.load()
                 result = predictor.predict_ticker(ticker)
-                if result.get("probability_30pct_gain") is not None:
-                    prob = result["probability_30pct_gain"]
+                if result.get("probability_gain") is not None:
+                    prob = result["probability_gain"]
                     signal = result.get("signal", "HOLD")
                     col_a, col_b = st.columns(2)
                     col_a.metric(
-                        "P(≥30% gain in 3M)",
+                        "P(≥20% gain in 3M)",
                         f"{prob * 100:.1f}%",
                     )
                     col_b.metric("Signal", signal)
@@ -595,6 +595,23 @@ elif page == "Model Training":
         with o4:
             st.metric("Accuracy", f"{metrics.get('accuracy_optimal', 0):.4f}")
 
+        # Two-stage metrics (model + rules)
+        prec_ts = metrics.get("precision_twostage")
+        if prec_ts is not None:
+            n_ts = metrics.get("n_predicted_twostage", 0)
+            st.markdown(
+                f"**Two-stage (model @ {opt_thresh:.2f} + earnings momentum + volume):**"
+            )
+            t1, t2, t3, t4 = st.columns(4)
+            with t1:
+                st.metric("Precision", f"{prec_ts:.4f}")
+            with t2:
+                st.metric("Recall", f"{metrics.get('recall_twostage', 0):.4f}")
+            with t3:
+                st.metric("F1 Score", f"{metrics.get('f1_twostage', 0):.4f}")
+            with t4:
+                st.metric("# Predicted Positives", f"{n_ts:,}")
+
         # Overfitting check
         m5, m6 = st.columns(2)
         with m5:
@@ -660,7 +677,7 @@ elif page == "Model Training":
             st.markdown("---")
             st.subheader("Cumulative Gain Chart")
             st.markdown(
-                "Shows the percentage of actual 30%+ gainers captured when "
+                "Shows the percentage of actual 20%+ gainers captured when "
                 "scoring the population from highest to lowest predicted "
                 "probability. The further the model curve is above the "
                 "diagonal (random), the better it is at ranking stocks."
@@ -728,17 +745,17 @@ elif page == "Batch Predictions":
             for i, ticker in enumerate(tickers):
                 progress.progress((i + 1) / len(tickers))
                 result = predictor.predict_ticker(ticker)
-                if result.get("probability_30pct_gain") is not None:
+                if result.get("probability_gain") is not None:
                     results.append(result)
 
-            results.sort(key=lambda x: x["probability_30pct_gain"], reverse=True)
+            results.sort(key=lambda x: x["probability_gain"], reverse=True)
 
             st.subheader(f"Results ({len(results)} stocks)")
 
             df = pd.DataFrame(results)
             df = df.rename(columns={
                 "ticker": "Ticker",
-                "probability_30pct_gain": "P(≥30% gain)",
+                "probability_gain": "P(≥20% gain)",
                 "probability_pct": "Probability %",
                 "signal": "Signal",
             })
@@ -747,11 +764,11 @@ elif page == "Batch Predictions":
             buy_signals = [r for r in results if r.get("signal") == "BUY"]
             if buy_signals:
                 st.success(
-                    f"Found {len(buy_signals)} stocks with BUY signal (≥50% probability of 30%+ gain)!"
+                    f"Found {len(buy_signals)} stocks with BUY signal (≥50% probability of 20%+ gain)!"
                 )
                 for r in buy_signals:
                     st.write(
-                        f"**{r['ticker']}**: {r['probability_pct']} probability of ≥30% gain"
+                        f"**{r['ticker']}**: {r['probability_pct']} probability of ≥20% gain"
                     )
             else:
                 st.info("No stocks with BUY signal found in this batch.")

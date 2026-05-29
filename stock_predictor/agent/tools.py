@@ -166,17 +166,18 @@ def stock_predictor_tool(ticker: str) -> str:
 
 @tool
 def scan_trending_stocks_tool(top_n: int = 10) -> str:
-    """Scan trending NASDAQ stocks and predict which will gain >=30% in 3 months.
+    """Scan trending NASDAQ stocks and predict which will gain >=20% in 3 months.
 
-    Identifies trending stocks from social media and runs the classification
-    model on each to find high-probability candidates.
+    Identifies trending stocks from social media and runs the two-stage
+    classification model (model + rule-based filters) on each to find
+    high-probability candidates.
 
     Args:
         top_n: Number of trending stocks to scan (default 10).
 
     Returns:
         JSON with predicted probabilities for each trending stock, sorted by
-        probability of >=30% gain.
+        probability of >=20% gain.
     """
     predictor = _get_predictor()
 
@@ -196,12 +197,12 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
     for ticker in all_tickers:
         try:
             prediction = predictor.predict_ticker(ticker)
-            if prediction.get("probability_30pct_gain") is not None:
+            if prediction.get("probability_gain") is not None:
                 results.append(prediction)
         except Exception:
             logger.warning("Failed to predict for %s", ticker)
 
-    results.sort(key=lambda x: x.get("probability_30pct_gain", -1), reverse=True)
+    results.sort(key=lambda x: x.get("probability_gain", -1), reverse=True)
 
     return json.dumps(
         {

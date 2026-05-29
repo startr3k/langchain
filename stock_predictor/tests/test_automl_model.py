@@ -146,7 +146,7 @@ class TestStockReturnPredictor:
             result = predictor.predict_ticker("AAPL")
 
         assert result["ticker"] == "AAPL"
-        assert result["probability_30pct_gain"] is not None
+        assert result["probability_gain"] is not None
         assert "signal" in result
 
     def test_predict_ticker_no_data(self):
@@ -160,7 +160,7 @@ class TestStockReturnPredictor:
         ):
             result = predictor.predict_ticker("INVALID")
 
-        assert result["probability_30pct_gain"] is None
+        assert result["probability_gain"] is None
         assert "error" in result
 
     def test_get_feature_importance(self):
@@ -202,13 +202,22 @@ class TestFeatureEngineering:
         assert len(SEC_FEATURES) > 0
         # ALL_FEATURE_NAMES excludes FUNDAMENTAL_FEATURES and
         # SENTIMENT_FEATURES (data leakage) and Google Trends
-        # (rate-limited).
+        # (rate-limited).  Includes short interest, options flow,
+        # insider transactions, and Reddit sentiment.
+        from stock_predictor.data.short_interest import SHORT_INTEREST_FEATURES
+        from stock_predictor.data.options_flow import OPTIONS_FLOW_FEATURES
+        from stock_predictor.data.insider_transactions import INSIDER_FEATURES
+        from stock_predictor.data.reddit_sentiment import REDDIT_SENTIMENT_FEATURES
         expected_total = (
             len(TECHNICAL_FEATURES)
             + len(HIST_FUNDAMENTAL_FEATURES)
             + len(MACRO_FEATURES)
             + len(EARNINGS_FEATURES)
             + len(SEC_FEATURES)
+            + len(SHORT_INTEREST_FEATURES)
+            + len(OPTIONS_FLOW_FEATURES)
+            + len(INSIDER_FEATURES)
+            + len(REDDIT_SENTIMENT_FEATURES)
             + len(DERIVED_FEATURES)
         )
         assert len(ALL_FEATURE_NAMES) == expected_total
