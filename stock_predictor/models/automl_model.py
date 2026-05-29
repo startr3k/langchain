@@ -194,6 +194,7 @@ class StockReturnPredictor:
         tickers: list[str] | None = None,
         time_budget: int = 120,
         include_sentiment: bool = True,
+        df: pd.DataFrame | None = None,
     ) -> dict:
         """Train the AutoML model on historical stock data.
 
@@ -201,15 +202,17 @@ class StockReturnPredictor:
             tickers: List of tickers for training data. Defaults to top NASDAQ.
             time_budget: Time budget in seconds for AutoML search.
             include_sentiment: Whether to include sentiment features.
+            df: Pre-built training DataFrame. If provided, tickers is ignored.
 
         Returns:
             Dictionary with training metrics.
         """
-        if tickers is None:
-            tickers = NASDAQ_TOP_TICKERS[:30]
+        if df is None:
+            if tickers is None:
+                tickers = NASDAQ_TOP_TICKERS[:30]
 
-        logger.info("Building training dataset for %d tickers...", len(tickers))
-        df = build_training_dataset(tickers, include_sentiment=include_sentiment)
+            logger.info("Building training dataset for %d tickers...", len(tickers))
+            df = build_training_dataset(tickers, include_sentiment=include_sentiment)
 
         if df.empty:
             raise ValueError("Training dataset is empty — no valid data collected.")
@@ -633,7 +636,9 @@ class StockReturnPredictor:
             return float(proba[0, 1])
         return float(proba[0])
 
-    def predict_ticker(self, ticker: str) -> dict:
+    def predict_ticker(
+        self, ticker: str, min_market_cap: float = 100_000_000
+    ) -> dict:
         """Predict whether a ticker will hit >=20% peak return within 3 months.
 
         Uses two-stage filtering:
@@ -642,10 +647,31 @@ class StockReturnPredictor:
 
         Args:
             ticker: Stock ticker symbol.
+            min_market_cap: Minimum market cap filter in dollars.
+                Default $100M (training universe). Use 1_000_000_000
+                for high-conviction large-cap mode.
 
         Returns:
             Dict with ticker, probability, classification, and rule checks.
         """
+        # Market cap gate
+        try:
+            import yfinance as yf
+            info = yf.Ticker(ticker).info
+            mcap = info.get("marketCap") or 0
+        except Exception:
+            mcap = 0
+
+        if mcap < min_market_cap:
+            return {
+                "ticker": ticker,
+                "probability_gain": None,
+                "prediction": None,
+                "market_cap": mcap,
+                "min_market_cap": min_market_cap,
+                "error": f"Market cap ${mcap/1e6:.0f}M below ${min_market_cap/1e6:.0f}M threshold.",
+            }
+
         row = build_training_row(ticker, include_sentiment=True)
         if row is None:
             return {
@@ -680,6 +706,8 @@ class StockReturnPredictor:
             "earnings_momentum_ok": earnings_momentum_ok,
             "volume_confirmed": volume_confirmed,
             "rules_pass": rules_pass,
+            "market_cap": mcap,
+            "min_market_cap": min_market_cap,
         }
 
     def save(self) -> None:

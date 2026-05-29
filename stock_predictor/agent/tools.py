@@ -130,7 +130,7 @@ def social_media_listener_tool(ticker: str) -> str:
 
 
 @tool
-def stock_predictor_tool(ticker: str) -> str:
+def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> str:
     """Predict the 3-month forward return for a stock using the trained AutoML model.
 
     This tool combines YFinance data and social media sentiment features, then
@@ -139,6 +139,8 @@ def stock_predictor_tool(ticker: str) -> str:
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA').
+        min_market_cap_millions: Minimum market cap in millions of dollars.
+            Default 100 ($100M). Use 1000 for high-conviction large-cap mode.
 
     Returns:
         JSON with the predicted 3-month return percentage and model confidence.
@@ -151,7 +153,9 @@ def stock_predictor_tool(ticker: str) -> str:
             "ticker": ticker,
         })
 
-    result = predictor.predict_ticker(ticker)
+    result = predictor.predict_ticker(
+        ticker, min_market_cap=min_market_cap_millions * 1_000_000
+    )
 
     # Add feature importance context
     importance = predictor.get_feature_importance(top_n=10)
