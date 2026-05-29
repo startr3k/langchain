@@ -551,6 +551,7 @@ elif page == "Model Training":
         st.markdown("---")
         st.subheader("Model Evaluation Metrics")
 
+        # Ranking metrics
         m1, m2, m3, m4 = st.columns(4)
         with m1:
             st.metric(
@@ -559,24 +560,54 @@ elif page == "Model Training":
                 help="Area Under ROC Curve on held-out test set (0.5 = random, 1.0 = perfect)",
             )
         with m2:
-            st.metric("Precision (Test)", f"{metrics.get('precision', 0):.4f}", help="Of predicted positives, how many were correct")
+            st.metric(
+                "Avg Precision (Test)",
+                f"{metrics.get('avg_precision', 0):.4f}",
+                help="Area under the Precision-Recall curve (higher = better at ranking positives)",
+            )
         with m3:
-            st.metric("Recall (Test)", f"{metrics.get('recall', 0):.4f}", help="Of actual positives, how many were found")
-        with m4:
-            st.metric("F1 Score (Test)", f"{metrics.get('f1_score', 0):.4f}", help="Harmonic mean of precision and recall")
-
-        m5, m6, m7, m8 = st.columns(4)
-        with m5:
             st.metric("Best Model", metrics.get("best_estimator", "N/A"))
-        with m6:
+        with m4:
             st.metric("Training Samples", metrics.get("training_samples", 0))
-        with m7:
-            st.metric("Accuracy (Test)", f"{metrics.get('accuracy', 0):.4f}")
-        with m8:
+
+        # Metrics at default threshold (0.5)
+        st.markdown("**At default threshold (0.50):**")
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
+        with d2:
+            st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
+        with d3:
+            st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
+        with d4:
+            st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
+
+        # Metrics at optimal threshold
+        opt_thresh = metrics.get("optimal_threshold", 0.5)
+        st.markdown(f"**At precision-optimized threshold ({opt_thresh:.2f}):**")
+        o1, o2, o3, o4 = st.columns(4)
+        with o1:
+            st.metric("Precision", f"{metrics.get('precision_optimal', 0):.4f}")
+        with o2:
+            st.metric("Recall", f"{metrics.get('recall_optimal', 0):.4f}")
+        with o3:
+            st.metric("F1 Score", f"{metrics.get('f1_optimal', 0):.4f}")
+        with o4:
+            st.metric("Accuracy", f"{metrics.get('accuracy_optimal', 0):.4f}")
+
+        # Overfitting check
+        m5, m6 = st.columns(2)
+        with m5:
             st.metric(
                 "AUC (Train)",
                 f"{metrics.get('auc_train', 0):.4f}",
                 help="Training AUC — compare with Test AUC to detect overfitting",
+            )
+        with m6:
+            st.metric(
+                "AP (Train)",
+                f"{metrics.get('ap_train', 0):.4f}",
+                help="Training Average Precision — compare with Test AP",
             )
 
         with st.expander("Full Training Configuration"):

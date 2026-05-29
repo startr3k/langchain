@@ -19,8 +19,10 @@ from flaml import AutoML, tune
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     classification_report,
     f1_score,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -176,6 +178,7 @@ FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
 SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
 CLIP_BOUNDS_PATH = MODEL_DIR / "feature_clip_bounds.pkl"
+THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
 
 
 # Classification threshold: predict class 1 when the stock achieves
@@ -197,6 +200,7 @@ class StockReturnPredictor:
         self.scaler: StandardScaler | None = None
         self.clip_lower: pd.Series | None = None
         self.clip_upper: pd.Series | None = None
+        self.optimal_threshold: float = 0.5
         self.is_trained = False
 
     def train(
@@ -251,10 +255,14 @@ class StockReturnPredictor:
         )
         y = y_binary
 
-        # Compute class weights for imbalanced data
+        # Compute class weights — use sqrt to moderate the imbalance
+        # correction.  Full inverse-frequency (n_neg/n_pos ≈ 2.76) pushes
+        # the model too hard toward recall; sqrt gives ~1.66x which
+        # balances precision and recall more evenly.
         weight_neg = 1.0
-        weight_pos = n_neg / max(n_pos, 1)
+        weight_pos = float(np.sqrt(n_neg / max(n_pos, 1)))
         sample_weight = y.map({0: weight_neg, 1: weight_pos}).values
+        logger.info("Class weight for positives: %.2f", weight_pos)
 
         # Semantically fill profit-related NaN values: these are NaN
         # because the company is unprofitable, not because data is
@@ -389,7 +397,7 @@ class StockReturnPredictor:
             y_train=y_train,
             task="classification",
             time_budget=time_budget,
-            metric="roc_auc",
+            metric="ap",
             estimator_list=["xgboost", "lgbm"],
             eval_method="cv",
             n_splits=5,
@@ -410,26 +418,64 @@ class StockReturnPredictor:
         else:
             y_proba_pos = y_proba_test
 
-        accuracy = accuracy_score(y_test, y_pred_test)
-        precision = precision_score(y_test, y_pred_test, zero_division=0)
-        recall = recall_score(y_test, y_pred_test, zero_division=0)
-        f1 = f1_score(y_test, y_pred_test, zero_division=0)
+        # --- Find optimal threshold that maximizes precision ---
+        # We require a minimum recall floor of 10% so the model still
+        # catches a meaningful number of winners.
+        MIN_RECALL = 0.10
+        prec_curve, rec_curve, thresholds = precision_recall_curve(
+            y_test, y_proba_pos,
+        )
+        # precision_recall_curve returns len(thresholds) = len(prec) - 1
+        best_threshold = 0.5
+        best_precision_at_thresh = 0.0
+        for p, r, t in zip(prec_curve[:-1], rec_curve[:-1], thresholds):
+            if r >= MIN_RECALL and p > best_precision_at_thresh:
+                best_precision_at_thresh = p
+                best_threshold = float(t)
+        self.optimal_threshold = best_threshold
+        logger.info(
+            "Optimal threshold: %.4f (precision=%.4f at recall>=%.0f%%)",
+            best_threshold, best_precision_at_thresh, MIN_RECALL * 100,
+        )
+
+        # Evaluate at default 0.5 and at optimal threshold
+        y_pred_default = (y_proba_pos >= 0.5).astype(int)
+        y_pred_optimal = (y_proba_pos >= self.optimal_threshold).astype(int)
+
+        accuracy = accuracy_score(y_test, y_pred_default)
+        precision_default = precision_score(y_test, y_pred_default, zero_division=0)
+        recall_default = recall_score(y_test, y_pred_default, zero_division=0)
+        f1_default = f1_score(y_test, y_pred_default, zero_division=0)
+
+        precision_opt = precision_score(y_test, y_pred_optimal, zero_division=0)
+        recall_opt = recall_score(y_test, y_pred_optimal, zero_division=0)
+        f1_opt = f1_score(y_test, y_pred_optimal, zero_division=0)
+        accuracy_opt = accuracy_score(y_test, y_pred_optimal)
+
         try:
             auc = roc_auc_score(y_test, y_proba_pos)
         except ValueError:
             auc = float("nan")
+        try:
+            ap = average_precision_score(y_test, y_proba_pos)
+        except ValueError:
+            ap = float("nan")
 
         # Training-set metrics for comparison (to detect overfitting)
-        y_pred_train = self.automl.predict(X_train)
         y_proba_train = self.automl.predict_proba(X_train)
         if y_proba_train.ndim == 2:
             y_proba_train_pos = y_proba_train[:, 1]
         else:
             y_proba_train_pos = y_proba_train
+        y_pred_train = (y_proba_train_pos >= 0.5).astype(int)
         try:
             auc_train = roc_auc_score(y_train, y_proba_train_pos)
         except ValueError:
             auc_train = float("nan")
+        try:
+            ap_train = average_precision_score(y_train, y_proba_train_pos)
+        except ValueError:
+            ap_train = float("nan")
         accuracy_train = accuracy_score(y_train, y_pred_train)
 
         # Logistic Regression baseline for comparison
@@ -456,22 +502,33 @@ class StockReturnPredictor:
             "test_samples": len(X_test),
             "num_features": len(feature_cols),
             "class_balance": f"{n_pos}/{n_neg} ({n_pos/(n_pos+n_neg)*100:.1f}%)",
+            # Metrics at default threshold (0.5)
             "accuracy": round(accuracy, 4),
-            "precision": round(precision, 4),
-            "recall": round(recall, 4),
-            "f1_score": round(f1, 4),
+            "precision": round(precision_default, 4),
+            "recall": round(recall_default, 4),
+            "f1_score": round(f1_default, 4),
+            # Metrics at optimal threshold
+            "optimal_threshold": round(self.optimal_threshold, 4),
+            "precision_optimal": round(precision_opt, 4),
+            "recall_optimal": round(recall_opt, 4),
+            "f1_optimal": round(f1_opt, 4),
+            "accuracy_optimal": round(accuracy_opt, 4),
+            # Ranking metrics
             "auc_roc": round(auc, 4),
+            "avg_precision": round(ap, 4),
             "accuracy_train": round(accuracy_train, 4),
             "auc_train": round(auc_train, 4),
+            "ap_train": round(ap_train, 4),
             "lr_accuracy": round(lr_accuracy, 4),
             "lr_auc": round(lr_auc, 4),
             "gain_chart": gain_chart_data,
         }
 
         logger.info(
-            "Training complete. Best: %s | Test AUC=%.4f | Train AUC=%.4f | "
-            "Accuracy=%.4f | F1=%.4f | LR AUC=%.4f",
-            self.automl.best_estimator, auc, auc_train, accuracy, f1, lr_auc,
+            "Training complete. Best: %s | Test AUC=%.4f AP=%.4f | "
+            "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | LR AUC=%.4f",
+            self.automl.best_estimator, auc, ap,
+            self.optimal_threshold, precision_opt, recall_opt, lr_auc,
         )
         self.save()
         return metrics
@@ -542,7 +599,7 @@ class StockReturnPredictor:
             }
 
         probability = self.predict(row)
-        prediction = 1 if probability >= 0.5 else 0
+        prediction = 1 if probability >= self.optimal_threshold else 0
         return {
             "ticker": ticker,
             "probability_30pct_gain": round(probability, 4),
@@ -559,6 +616,7 @@ class StockReturnPredictor:
         joblib.dump(self.feature_medians, MEDIANS_PATH)
         joblib.dump(self.scaler, SCALER_PATH)
         joblib.dump((self.clip_lower, self.clip_upper), CLIP_BOUNDS_PATH)
+        joblib.dump(self.optimal_threshold, THRESHOLD_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
     def load(self) -> None:
@@ -575,6 +633,8 @@ class StockReturnPredictor:
             self.scaler = joblib.load(SCALER_PATH)
         if CLIP_BOUNDS_PATH.exists():
             self.clip_lower, self.clip_upper = joblib.load(CLIP_BOUNDS_PATH)
+        if THRESHOLD_PATH.exists():
+            self.optimal_threshold = joblib.load(THRESHOLD_PATH)
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 
