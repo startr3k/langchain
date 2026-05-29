@@ -138,6 +138,38 @@ def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _compute_gain_chart(
+    y_true: np.ndarray, y_proba: np.ndarray, n_bins: int = 20,
+) -> dict:
+    """Compute cumulative gain chart data.
+
+    Sorts predictions by descending probability and computes what
+    fraction of all positives is captured at each population decile.
+
+    Returns dict with ``percentages`` (population %) and ``gains``
+    (cumulative % of positives captured), plus a ``random`` baseline.
+    """
+    order = np.argsort(-y_proba)
+    y_sorted = np.asarray(y_true)[order]
+    total_pos = y_sorted.sum()
+    if total_pos == 0:
+        return {"percentages": [], "gains": [], "random": []}
+
+    n = len(y_sorted)
+    percentages = []
+    gains = []
+    random_gains = []
+    for i in range(1, n_bins + 1):
+        idx = int(n * i / n_bins)
+        pct = round(i / n_bins * 100, 1)
+        gain = round(y_sorted[:idx].sum() / total_pos * 100, 2)
+        percentages.append(pct)
+        gains.append(gain)
+        random_gains.append(pct)
+
+    return {"percentages": percentages, "gains": gains, "random": random_gains}
+
+
 MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
@@ -413,6 +445,9 @@ class StockReturnPredictor:
         except ValueError:
             lr_auc = float("nan")
 
+        # --- Gain chart data (decile-based cumulative gain) ---
+        gain_chart_data = _compute_gain_chart(y_test.values, y_proba_pos)
+
         metrics = {
             "best_estimator": self.automl.best_estimator,
             "best_config": self.automl.best_config,
@@ -430,6 +465,7 @@ class StockReturnPredictor:
             "auc_train": round(auc_train, 4),
             "lr_accuracy": round(lr_accuracy, 4),
             "lr_auc": round(lr_auc, 4),
+            "gain_chart": gain_chart_data,
         }
 
         logger.info(

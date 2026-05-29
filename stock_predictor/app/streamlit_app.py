@@ -620,6 +620,46 @@ elif page == "Model Training":
             )
             st.plotly_chart(fig, use_container_width=True)
 
+    # ---- Gain Chart ----
+    if "training_metrics" in st.session_state:
+        gain_data = st.session_state["training_metrics"].get("gain_chart")
+        if gain_data and gain_data.get("percentages"):
+            import plotly.graph_objects as go  # noqa: F811
+
+            st.markdown("---")
+            st.subheader("Cumulative Gain Chart")
+            st.markdown(
+                "Shows the percentage of actual 30%+ gainers captured when "
+                "scoring the population from highest to lowest predicted "
+                "probability. The further the model curve is above the "
+                "diagonal (random), the better it is at ranking stocks."
+            )
+
+            fig_gain = go.Figure()
+            fig_gain.add_trace(go.Scatter(
+                x=gain_data["percentages"],
+                y=gain_data["gains"],
+                mode="lines+markers",
+                name="Model",
+                line=dict(color="#636EFA", width=2),
+                marker=dict(size=5),
+            ))
+            fig_gain.add_trace(go.Scatter(
+                x=gain_data["percentages"],
+                y=gain_data["random"],
+                mode="lines",
+                name="Random (baseline)",
+                line=dict(color="gray", width=1, dash="dash"),
+            ))
+            fig_gain.update_layout(
+                xaxis_title="% of Population (ranked by model score)",
+                yaxis_title="% of Actual Positives Captured",
+                height=450,
+                legend=dict(yanchor="bottom", y=0.05, xanchor="right", x=0.95),
+                hovermode="x unified",
+            )
+            st.plotly_chart(fig_gain, use_container_width=True)
+
     # Model status (if no metrics in session)
     if "training_metrics" not in st.session_state:
         st.markdown("---")
