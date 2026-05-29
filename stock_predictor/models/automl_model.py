@@ -163,7 +163,6 @@ MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
 SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
-CLIP_BOUNDS_PATH = MODEL_DIR / "feature_clip_bounds.pkl"
 THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
 
 
@@ -187,8 +186,6 @@ class StockReturnPredictor:
         self.feature_names: list[str] = []
         self.feature_medians: pd.Series | None = None
         self.scaler: StandardScaler | None = None
-        self.clip_lower: pd.Series | None = None
-        self.clip_upper: pd.Series | None = None
         self.optimal_threshold: float = 0.5
         self.is_trained = False
 
@@ -306,13 +303,6 @@ class StockReturnPredictor:
         # Fill remaining NaN features with median and save medians for prediction
         self.feature_medians = X.median()
         X = X.fillna(self.feature_medians)
-
-        # Winsorize features at 1st/99th percentiles to clip extreme
-        # outliers while preserving the overall distribution shape.
-        # Bounds are saved for consistent clipping at prediction time.
-        self.clip_lower = X.quantile(0.01)
-        self.clip_upper = X.quantile(0.99)
-        X = X.clip(lower=self.clip_lower, upper=self.clip_upper, axis=1)
 
         # --- Temporal train/test split to avoid data leakage ---
         # Sort by date so split is chronological, not random
@@ -630,8 +620,6 @@ class StockReturnPredictor:
         else:
             df = df.fillna(0.0)
 
-        if self.clip_lower is not None and self.clip_upper is not None:
-            df = df.clip(lower=self.clip_lower, upper=self.clip_upper, axis=1)
 
         if self.scaler is not None:
             df = pd.DataFrame(
@@ -701,7 +689,6 @@ class StockReturnPredictor:
         joblib.dump(self.feature_names, FEATURE_NAMES_PATH)
         joblib.dump(self.feature_medians, MEDIANS_PATH)
         joblib.dump(self.scaler, SCALER_PATH)
-        joblib.dump((self.clip_lower, self.clip_upper), CLIP_BOUNDS_PATH)
         joblib.dump(self.optimal_threshold, THRESHOLD_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
@@ -717,8 +704,6 @@ class StockReturnPredictor:
             self.feature_medians = joblib.load(MEDIANS_PATH)
         if SCALER_PATH.exists():
             self.scaler = joblib.load(SCALER_PATH)
-        if CLIP_BOUNDS_PATH.exists():
-            self.clip_lower, self.clip_upper = joblib.load(CLIP_BOUNDS_PATH)
         if THRESHOLD_PATH.exists():
             self.optimal_threshold = joblib.load(THRESHOLD_PATH)
         self.is_trained = True
