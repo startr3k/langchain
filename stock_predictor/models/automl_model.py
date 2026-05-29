@@ -620,7 +620,10 @@ class StockReturnPredictor:
         return float(proba[0])
 
     def predict_ticker(
-        self, ticker: str, min_market_cap: float = 100_000_000
+        self,
+        ticker: str,
+        min_market_cap: float = 100_000_000,
+        include_explanation: bool = False,
     ) -> dict:
         """Predict whether a ticker will hit >=20% peak return within 3 months.
 
@@ -633,6 +636,8 @@ class StockReturnPredictor:
             min_market_cap: Minimum market cap filter in dollars.
                 Default $100M (training universe). Use 1_000_000_000
                 for high-conviction large-cap mode.
+            include_explanation: If True, compute SHAP explanation for the
+                prediction. Adds ~50ms per call. Default False.
 
         Returns:
             Dict with ticker, probability, classification, and rule checks.
@@ -665,7 +670,11 @@ class StockReturnPredictor:
             }
 
         probability = self.predict(row)
-        explanation = self.explain_prediction(row, top_n=5)
+        explanation = (
+            self.explain_prediction(row, top_n=5)
+            if include_explanation
+            else []
+        )
 
         # Stage 2: rule-based post-filters on raw features
         if isinstance(row, dict):
@@ -808,7 +817,13 @@ class StockReturnPredictor:
         model = self.automl.model.estimator
         if hasattr(model, "feature_importances_"):
             importances = model.feature_importances_
-            pairs = list(zip(self.feature_names, importances))
+            if hasattr(model, "feature_name_"):
+                names = model.feature_name_
+            elif hasattr(model, "feature_names_in_"):
+                names = list(model.feature_names_in_)
+            else:
+                names = self.feature_names
+            pairs = list(zip(names, importances))
             pairs.sort(key=lambda x: x[1], reverse=True)
             return pairs[:top_n]
         return []

@@ -146,8 +146,8 @@ if page == "Top Recommendations":
                 text=f"Processing {ticker} ({i+1}/{len(scan_tickers)})...",
             )
 
-            # Model prediction
-            pred = predictor.predict_ticker(ticker)
+            # Model prediction (with SHAP explanation for display)
+            pred = predictor.predict_ticker(ticker, include_explanation=True)
             prob = pred.get("probability_gain")
             if prob is None:
                 continue
