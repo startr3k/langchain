@@ -70,6 +70,7 @@ page = st.sidebar.radio(
     "Navigate",
     [
         "Top Recommendations",
+        "Stock Chart",
         "AI Stock Advisor",
         "Stock Analysis",
         "Social Sentiment",
@@ -242,6 +243,175 @@ if page == "Top Recommendations":
                 use_container_width=True,
                 hide_index=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# Page: Stock Chart
+# ---------------------------------------------------------------------------
+elif page == "Stock Chart":
+    st.title("Stock Chart Dashboard")
+
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    from datetime import datetime, timedelta
+    import numpy as _np
+
+    col_ticker, col_period = st.columns([1, 2])
+    with col_ticker:
+        chart_ticker = st.text_input("Ticker", value="AAPL").strip().upper()
+
+    with col_period:
+        period_options = ["1M", "3M", "6M", "1Y", "2Y", "5Y", "Custom"]
+        selected_period = st.radio("Time Period", period_options, horizontal=True, index=3)
+
+    custom_start = custom_end = None
+    if selected_period == "Custom":
+        col_s, col_e = st.columns(2)
+        with col_s:
+            custom_start = st.date_input("Start Date", value=datetime.now() - timedelta(days=365))
+        with col_e:
+            custom_end = st.date_input("End Date", value=datetime.now())
+
+    if st.button("Load Chart", type="primary") or chart_ticker:
+        # Map period to yfinance period string
+        period_map = {"1M": "1mo", "3M": "3mo", "6M": "6mo", "1Y": "1y", "2Y": "2y", "5Y": "5y"}
+
+        with st.spinner(f"Loading {chart_ticker} data..."):
+            if selected_period == "Custom" and custom_start and custom_end:
+                import yfinance as yf
+                tk = yf.Ticker(chart_ticker)
+                df = tk.history(start=str(custom_start), end=str(custom_end))
+            else:
+                yf_period = period_map.get(selected_period, "1y")
+                df = get_stock_data(chart_ticker, period=yf_period)
+
+        if df.empty:
+            st.error(f"No data found for {chart_ticker}")
+        else:
+            # Compute moving averages
+            df["SMA_20"] = df["Close"].rolling(20).mean()
+            df["SMA_50"] = df["Close"].rolling(50).mean()
+            df["SMA_200"] = df["Close"].rolling(200).mean()
+
+            # Compute RSI
+            delta = df["Close"].diff()
+            gain = delta.clip(lower=0)
+            loss = (-delta).clip(lower=0)
+            avg_gain = gain.rolling(14).mean()
+            avg_loss = loss.rolling(14).mean()
+            rs = avg_gain / avg_loss
+            df["RSI_14"] = 100 - (100 / (1 + rs))
+
+            # Use index as dates
+            dates = df.index
+
+            # Create subplots: price, volume, RSI
+            fig = make_subplots(
+                rows=3, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                row_heights=[0.6, 0.2, 0.2],
+                subplot_titles=(f"{chart_ticker} Price", "Volume", "RSI (14)"),
+            )
+
+            # Candlestick chart
+            fig.add_trace(
+                go.Candlestick(
+                    x=dates,
+                    open=df["Open"],
+                    high=df["High"],
+                    low=df["Low"],
+                    close=df["Close"],
+                    name="Price",
+                    increasing_line_color="#26a69a",
+                    decreasing_line_color="#ef5350",
+                ),
+                row=1, col=1,
+            )
+
+            # Moving averages
+            fig.add_trace(
+                go.Scatter(x=dates, y=df["SMA_20"], name="SMA 20",
+                           line=dict(color="#2196F3", width=1)),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=dates, y=df["SMA_50"], name="SMA 50",
+                           line=dict(color="#FF9800", width=1)),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=dates, y=df["SMA_200"], name="SMA 200",
+                           line=dict(color="#9C27B0", width=1.5)),
+                row=1, col=1,
+            )
+
+            # Volume bars (colored by direction)
+            colors = [
+                "#26a69a" if c >= o else "#ef5350"
+                for c, o in zip(df["Close"], df["Open"])
+            ]
+            fig.add_trace(
+                go.Bar(x=dates, y=df["Volume"], name="Volume",
+                       marker_color=colors, opacity=0.7),
+                row=2, col=1,
+            )
+
+            # RSI
+            fig.add_trace(
+                go.Scatter(x=dates, y=df["RSI_14"], name="RSI 14",
+                           line=dict(color="#7C4DFF", width=1.5)),
+                row=3, col=1,
+            )
+            # RSI overbought/oversold lines
+            fig.add_hline(y=70, line_dash="dash", line_color="red",
+                          opacity=0.5, row=3, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green",
+                          opacity=0.5, row=3, col=1)
+            fig.add_hline(y=50, line_dash="dot", line_color="gray",
+                          opacity=0.3, row=3, col=1)
+
+            fig.update_layout(
+                height=800,
+                xaxis_rangeslider_visible=False,
+                template="plotly_dark",
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1,
+                ),
+                margin=dict(l=50, r=20, t=60, b=20),
+            )
+
+            fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+            fig.update_yaxes(title_text="Volume", row=2, col=1)
+            fig.update_yaxes(title_text="RSI", row=3, col=1, range=[0, 100])
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Summary stats
+            latest = df.iloc[-1]
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("Close", f"${latest['Close']:.2f}",
+                          delta=f"{((latest['Close'] / df.iloc[-2]['Close']) - 1) * 100:.2f}%" if len(df) > 1 else None)
+            with col2:
+                st.metric("SMA 20", f"${latest['SMA_20']:.2f}" if pd.notna(latest.get('SMA_20')) else "N/A")
+            with col3:
+                st.metric("SMA 50", f"${latest['SMA_50']:.2f}" if pd.notna(latest.get('SMA_50')) else "N/A")
+            with col4:
+                st.metric("SMA 200", f"${latest['SMA_200']:.2f}" if pd.notna(latest.get('SMA_200')) else "N/A")
+            with col5:
+                rsi_val = latest.get("RSI_14")
+                rsi_label = ""
+                if pd.notna(rsi_val):
+                    if rsi_val >= 70:
+                        rsi_label = " (Overbought)"
+                    elif rsi_val <= 30:
+                        rsi_label = " (Oversold)"
+                st.metric("RSI 14", f"{rsi_val:.1f}{rsi_label}" if pd.notna(rsi_val) else "N/A")
 
 
 # ---------------------------------------------------------------------------
