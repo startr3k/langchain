@@ -96,6 +96,10 @@ def compute_technical_features(df: pd.DataFrame) -> pd.DataFrame:
     # Volume features
     df["Volume_SMA_20"] = df["Volume"].rolling(window=20).mean()
     df["Volume_Ratio"] = df["Volume"] / df["Volume_SMA_20"]
+    # 3-day volume surge: avg volume over last 3 days / 20-day avg
+    df["Volume_Surge_3d"] = (
+        df["Volume"].rolling(window=3).mean() / df["Volume_SMA_20"]
+    )
 
     # RSI
     delta = df["Close"].diff()

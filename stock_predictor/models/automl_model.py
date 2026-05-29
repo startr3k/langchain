@@ -3,7 +3,7 @@
 Predicts whether a stock will achieve >=20% peak return at any point
 within a 3-month window.  Uses a two-stage approach: Stage 1 is the
 AutoML model, Stage 2 applies rule-based post-filters (positive
-earnings momentum and volume confirmation) to boost precision.  FLAML (Fast Lightweight AutoML) automatically
+earnings momentum and 3-day volume surge) to boost precision.  FLAML (Fast Lightweight AutoML) automatically
 selects the best model and hyperparameters from XGBoost, LightGBM, etc.
 """
 
@@ -177,7 +177,7 @@ class StockReturnPredictor:
     Predicts class 1 (>=20% peak return within 3 months) vs class 0.
     Uses balanced class weights and Average Precision as metric.
     Two-stage prediction: model probability + rule-based post-filters
-    (positive earnings momentum and above-average volume) for higher
+    (positive earnings momentum and 3-day volume surge > 1.5x) for higher
     precision.
     """
 
@@ -524,8 +524,8 @@ class StockReturnPredictor:
         # --- Two-stage evaluation (model + rules) on test set ---
         raw_X_test = raw_X.iloc[split_idx + gap_rows:]
         em_col = raw_X_test.get("hist_earnings_growth_qoq", pd.Series(0.0, index=raw_X_test.index))
-        vr_col = raw_X_test.get("Volume_Ratio", pd.Series(0.0, index=raw_X_test.index))
-        rules_mask = (em_col.fillna(0) > 0) & (vr_col.fillna(0) > 1.0)
+        vs_col = raw_X_test.get("Volume_Surge_3d", pd.Series(0.0, index=raw_X_test.index))
+        rules_mask = (em_col.fillna(0) > 0) & (vs_col.fillna(0) > 1.5)
 
         y_pred_twostage = (y_pred_optimal.astype(bool) & rules_mask.values).astype(int)
         n_ts = int(y_pred_twostage.sum())
@@ -638,7 +638,7 @@ class StockReturnPredictor:
 
         Uses two-stage filtering:
           Stage 1: Model probability >= optimal_threshold
-          Stage 2: Positive earnings momentum AND above-average volume
+          Stage 2: Positive earnings momentum AND 3-day volume surge > 1.5x
 
         Args:
             ticker: Stock ticker symbol.
@@ -664,7 +664,7 @@ class StockReturnPredictor:
             raw = row.to_dict() if hasattr(row, "to_dict") else {}
 
         earnings_momentum_ok = float(raw.get("hist_earnings_growth_qoq", 0) or 0) > 0
-        volume_confirmed = float(raw.get("Volume_Ratio", 0) or 0) > 1.0
+        volume_confirmed = float(raw.get("Volume_Surge_3d", 0) or 0) > 1.5
         rules_pass = earnings_momentum_ok and volume_confirmed
 
         model_pass = probability >= self.optimal_threshold

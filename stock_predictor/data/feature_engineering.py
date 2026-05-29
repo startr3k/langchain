@@ -91,7 +91,7 @@ TECHNICAL_FEATURES = [
     "Volatility_Contraction", "Momentum_Accel",
     "Volume_Price_Confirm", "Dist_52w_High", "Dist_52w_Low",
     "BB_Squeeze_Duration",
-    "Volume_Ratio", "Volume_Spike_Magnitude",
+    "Volume_Ratio", "Volume_Surge_3d", "Volume_Spike_Magnitude",
     "RSI_14", "MACD", "MACD_Hist",
     "BB_Width", "BB_Position",
 ]
