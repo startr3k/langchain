@@ -113,6 +113,9 @@ class TestStockReturnPredictor:
             "stock_predictor.models.automl_model.MEDIANS_PATH",
             tmp_path / "medians.pkl",
         ), patch(
+            "stock_predictor.models.automl_model.THRESHOLD_PATH",
+            tmp_path / "threshold.pkl",
+        ), patch(
             "stock_predictor.models.automl_model.build_training_dataset",
             return_value=df,
         ):

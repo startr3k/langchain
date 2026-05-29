@@ -30,7 +30,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler
 
 from stock_predictor.data.feature_engineering import (
     ALL_FEATURE_NAMES,
@@ -162,7 +161,6 @@ MODEL_DIR = Path(__file__).parent / "saved"
 MODEL_PATH = MODEL_DIR / "stock_predictor_model.pkl"
 FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
-SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
 THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
 
 
@@ -185,7 +183,6 @@ class StockReturnPredictor:
         self.automl = AutoML()
         self.feature_names: list[str] = []
         self.feature_medians: pd.Series | None = None
-        self.scaler: StandardScaler | None = None
         self.optimal_threshold: float = 0.5
         self.is_trained = False
 
@@ -325,18 +322,6 @@ class StockReturnPredictor:
         X_test = X.iloc[split_idx + gap_rows:]
         y_test = y.iloc[split_idx + gap_rows:]
 
-        # Standardize features so no single feature dominates by scale
-        self.scaler = StandardScaler()
-        X_train = pd.DataFrame(
-            self.scaler.fit_transform(X_train),
-            columns=feature_cols,
-            index=X_train.index,
-        )
-        X_test = pd.DataFrame(
-            self.scaler.transform(X_test),
-            columns=feature_cols,
-            index=X_test.index,
-        )
 
         logger.info(
             "Training AutoML on %d samples (%d train / %d gap / %d test), "
@@ -509,16 +494,21 @@ class StockReturnPredictor:
         accuracy_train = accuracy_score(y_train, y_pred_train)
 
         # Logistic Regression baseline for comparison
-        lr = LogisticRegression(
-            class_weight="balanced", max_iter=1000, random_state=42,
-        )
-        lr.fit(X_train, y_train)
-        lr_pred = lr.predict(X_test)
-        lr_proba = lr.predict_proba(X_test)[:, 1]
-        lr_accuracy = accuracy_score(y_test, lr_pred)
         try:
+            from sklearn.impute import SimpleImputer
+            imputer = SimpleImputer(strategy="median")
+            X_train_imp = imputer.fit_transform(X_train)
+            X_test_imp = imputer.transform(X_test)
+            lr = LogisticRegression(
+                class_weight="balanced", max_iter=1000, random_state=42,
+            )
+            lr.fit(X_train_imp, y_train)
+            lr_pred = lr.predict(X_test_imp)
+            lr_proba = lr.predict_proba(X_test_imp)[:, 1]
+            lr_accuracy = accuracy_score(y_test, lr_pred)
             lr_auc = roc_auc_score(y_test, lr_proba)
-        except ValueError:
+        except Exception:
+            lr_accuracy = float("nan")
             lr_auc = float("nan")
 
         # --- Gain chart data (decile-based cumulative gain) ---
@@ -624,13 +614,6 @@ class StockReturnPredictor:
             df = df.fillna(0.0)
 
 
-        if self.scaler is not None:
-            df = pd.DataFrame(
-                self.scaler.transform(df),
-                columns=self.feature_names,
-                index=df.index,
-            )
-
         proba = self.automl.predict_proba(df)
         if proba.ndim == 2:
             return float(proba[0, 1])
@@ -716,7 +699,6 @@ class StockReturnPredictor:
         joblib.dump(self.automl, MODEL_PATH)
         joblib.dump(self.feature_names, FEATURE_NAMES_PATH)
         joblib.dump(self.feature_medians, MEDIANS_PATH)
-        joblib.dump(self.scaler, SCALER_PATH)
         joblib.dump(self.optimal_threshold, THRESHOLD_PATH)
         logger.info("Model saved to %s", MODEL_PATH)
 
@@ -730,8 +712,6 @@ class StockReturnPredictor:
         self.feature_names = joblib.load(FEATURE_NAMES_PATH)
         if MEDIANS_PATH.exists():
             self.feature_medians = joblib.load(MEDIANS_PATH)
-        if SCALER_PATH.exists():
-            self.scaler = joblib.load(SCALER_PATH)
         if THRESHOLD_PATH.exists():
             self.optimal_threshold = joblib.load(THRESHOLD_PATH)
         self.is_trained = True
