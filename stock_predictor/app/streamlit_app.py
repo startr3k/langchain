@@ -35,6 +35,15 @@ from stock_predictor.pipeline.daily_picks import (
     get_precision_over_time,
     DEFAULT_CSV_PATH,
 )
+from stock_predictor.pipeline.scheduler import (
+    get_schedule_config,
+    schedule_pipeline,
+    stop_schedule,
+    is_scheduled,
+    get_next_run,
+    get_run_log,
+    restore_schedule,
+)
 from stock_predictor.pipeline.social_listener import get_social_hottest, get_eligible_tickers
 
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +58,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Restore any saved pipeline schedule on app startup
+restore_schedule()
 
 # ---------------------------------------------------------------------------
 # Sidebar
@@ -1430,6 +1442,80 @@ elif page == "Daily Picks Pipeline":
                                          use_container_width=True)
                 except Exception as e:
                     st.error(f"Evaluation error: {e}")
+
+    # -- Scheduler section ------------------------------------------------
+    st.markdown("---")
+    st.subheader("⏰ Schedule Pipeline")
+
+    sched_cfg = get_schedule_config()
+    active = is_scheduled()
+
+    if active:
+        next_run = get_next_run()
+        st.success(
+            f"Pipeline is scheduled **{sched_cfg.get('frequency', 'daily')}** "
+            f"at **{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC**.  "
+            f"Next run: {next_run or 'N/A'}"
+        )
+        if st.button("⏹️ Stop Schedule"):
+            stop_schedule()
+            st.rerun()
+    else:
+        st.info("No schedule active. Configure one below to auto-generate picks.")
+
+    with st.expander("Configure Schedule", expanded=not active):
+        sched_col1, sched_col2 = st.columns(2)
+        with sched_col1:
+            sched_freq = st.selectbox(
+                "Frequency",
+                ["daily", "weekly"],
+                index=0 if sched_cfg.get("frequency", "daily") == "daily" else 1,
+                key="sched_freq",
+            )
+            sched_hour = st.slider(
+                "Hour (UTC)", 0, 23,
+                value=sched_cfg.get("hour", 6),
+                key="sched_hour",
+            )
+            sched_minute = st.slider(
+                "Minute", 0, 59,
+                value=sched_cfg.get("minute", 0),
+                key="sched_minute",
+            )
+        with sched_col2:
+            sched_dow = st.selectbox(
+                "Day of week (weekly only)",
+                ["mon", "tue", "wed", "thu", "fri", "sat", "sun", "mon-fri"],
+                index=7,
+                key="sched_dow",
+            )
+            sched_mcap = st.selectbox(
+                "Min market cap (schedule)",
+                [("$100M", 100_000_000), ("$500M", 500_000_000), ("$1B", 1_000_000_000)],
+                format_func=lambda x: x[0],
+                index=2,
+                key="sched_mcap",
+            )
+
+        if st.button("💾 Save & Start Schedule", type="primary"):
+            result = schedule_pipeline(
+                hour=sched_hour,
+                minute=sched_minute,
+                frequency=sched_freq,
+                day_of_week=sched_dow,
+                min_market_cap=sched_mcap[1],
+            )
+            st.success(
+                f"Schedule saved! Next run: {result.get('next_run', 'N/A')}"
+            )
+            st.rerun()
+
+    # Run log
+    run_log = get_run_log()
+    if run_log:
+        with st.expander(f"Scheduler Run History ({len(run_log)} runs)"):
+            log_df = pd.DataFrame(run_log)
+            st.dataframe(log_df, use_container_width=True)
 
     # Show precision over time if data exists
     st.markdown("---")

@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Default path for the daily picks CSV.
 DEFAULT_CSV_PATH = Path(__file__).resolve().parent.parent.parent / "daily_picks.csv"
 
+# Path to the cached training data (10-year full dataset, ~950 MB).
+_TRAINING_CSV_PATH = Path(__file__).resolve().parent.parent.parent / "training_data_10y_full.csv"
+
 CSV_COLUMNS = [
     "date",
     "rank",
@@ -67,8 +70,6 @@ def run_daily_picks(
 
     Returns a DataFrame of the picks that were recorded.
     """
-    from stock_predictor.data.sentiment import get_sentiment_features
-    from stock_predictor.data.yfinance_client import get_stock_data, get_stock_info
     from stock_predictor.models.automl_model import StockReturnPredictor
 
     csv_path = Path(csv_path or DEFAULT_CSV_PATH)
@@ -85,43 +86,26 @@ def run_daily_picks(
     predictor = StockReturnPredictor()
     predictor.load()
 
-    # Scan a broad universe
-    from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
+    # ── Fast batch scoring using cached training data ─────────────────
+    # Load the latest row per ticker from the training CSV (all 617
+    # tickers, pre-computed features) and score them in a single batch.
+    # Only falls back to slow per-ticker yFinance fetching if the cache
+    # is missing or stale (>7 days old).
+    top_picks = _batch_score_from_cache(
+        predictor,
+        top_k=top_k,
+        min_market_cap=min_market_cap,
+    )
 
-    # Build a larger ticker list from the training data cache if available
-    tickers_to_scan: list[str] = list(NASDAQ_TOP_TICKERS)
-
-    # Also add S&P 500 / Dow tickers from a known list
-    try:
-        sp500 = _get_major_index_tickers()
-        tickers_to_scan = list(set(tickers_to_scan) | set(sp500))
-    except Exception:
-        logger.warning("Could not fetch index tickers, using NASDAQ list only")
-
-    logger.info("Scanning %d tickers for daily picks...", len(tickers_to_scan))
-
-    results: list[dict] = []
-    for ticker in tickers_to_scan:
-        try:
-            result = predictor.predict_ticker(ticker, min_market_cap=min_market_cap)
-            if result.get("probability_gain") is not None:
-                results.append(result)
-        except Exception:
-            continue
-
-    if not results:
+    if not top_picks:
         logger.warning("No valid predictions — pipeline produced 0 picks.")
         return pd.DataFrame(columns=CSV_COLUMNS)
-
-    # Sort by probability (or ensemble score if available)
-    results.sort(key=lambda x: x.get("probability_gain", 0), reverse=True)
-    top_picks = results[:top_k]
 
     rows: list[dict] = []
     for rank, r in enumerate(top_picks, 1):
         ticker = r["ticker"]
 
-        # Fetch sentiment
+        # Fetch sentiment (lightweight — only for top-K picks)
         sentiment_data = _safe_sentiment(ticker)
         sentiment_score = sentiment_data.get("sentiment_mean_polarity", 0.0)
         sentiment_mentions = sentiment_data.get("sentiment_total_mentions", 0)
@@ -129,20 +113,10 @@ def run_daily_picks(
         # SHAP explanations
         shap_str = _get_shap_explanation(predictor, ticker)
 
-        # Stock info
-        info = _safe_stock_info(ticker)
-        market_cap = info.get("marketCap", info.get("market_cap"))
-        sector = info.get("sector", "N/A")
-
-        # Get closing price
+        # Use data already fetched by _batch_score_from_cache
         close_price = r.get("last_close")
-        if close_price is None:
-            try:
-                df_price = get_stock_data(ticker, period="5d")
-                if df_price is not None and not df_price.empty:
-                    close_price = float(df_price["Close"].iloc[-1])
-            except Exception:
-                close_price = None
+        market_cap = r.get("market_cap")
+        sector = r.get("sector", "N/A")
 
         row = {
             "date": today_str,
@@ -285,6 +259,170 @@ def get_precision_over_time(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _batch_score_from_cache(
+    predictor,
+    *,
+    top_k: int = 10,
+    min_market_cap: float = 100_000_000,
+) -> list[dict]:
+    """Score all tickers from the cached training CSV in one batch.
+
+    Steps:
+    1. Load the latest row per ticker from training_data_10y_full.csv.
+    2. Run ``predict_batch`` on the whole DataFrame (~617 rows).
+    3. Rank by ensemble score and return the top-K results.
+
+    Falls back to the slow per-ticker loop if the cache is missing.
+    """
+    if not _TRAINING_CSV_PATH.exists():
+        logger.warning("Training cache not found at %s — falling back to slow scan", _TRAINING_CSV_PATH)
+        return _slow_scan_tickers(predictor, top_k=top_k, min_market_cap=min_market_cap)
+
+    logger.info("Loading cached training data from %s ...", _TRAINING_CSV_PATH)
+    cache_df = pd.read_csv(_TRAINING_CSV_PATH)
+
+    # Keep only the latest date per ticker
+    cache_df["_date"] = pd.to_datetime(cache_df["_date"])
+    latest_idx = cache_df.groupby("Ticker")["_date"].idxmax()
+    latest_df = cache_df.loc[latest_idx].copy().reset_index(drop=True)
+    logger.info(
+        "Loaded %d tickers, latest dates: %s to %s",
+        len(latest_df),
+        latest_df["_date"].min().date(),
+        latest_df["_date"].max().date(),
+    )
+
+    # Warn if cache is stale (>7 days old)
+    max_date = latest_df["_date"].max()
+    staleness = (pd.Timestamp.now() - max_date).days
+    if staleness > 7:
+        logger.warning(
+            "Training cache is %d days old (latest: %s) — predictions may be stale",
+            staleness,
+            max_date.date(),
+        )
+
+    tickers = latest_df["Ticker"].values
+
+    # Batch score all tickers at once
+    scores = predictor.predict_batch(
+        latest_df,
+        tickers=pd.Series(tickers),
+        apply_adjustments=True,
+    )
+
+    # Build results with scores
+    scored = pd.DataFrame({
+        "ticker": tickers,
+        "ensemble_score": scores,
+    })
+
+    # Merge back feature columns we need for the output
+    feature_cols = [
+        "Volume_Surge_3d", "Volatility_20d",
+    ]
+    for col in feature_cols:
+        if col in latest_df.columns:
+            scored[col] = latest_df[col].values
+
+    # Sort by ensemble score descending
+    scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
+
+    import yfinance as yf
+
+    # Use fast_info to batch-filter by market cap (near-instant per call).
+    # Then only fetch full info for the top-K picks that pass.
+    all_tickers = scored["ticker"].tolist()
+    logger.info("Filtering %d tickers by market cap >= $%.0fB...", len(all_tickers), min_market_cap / 1e9)
+
+    mcap_map: dict[str, float] = {}
+    for t in all_tickers:
+        try:
+            fi = yf.Ticker(t).fast_info
+            mcap_map[t] = float(fi.get("marketCap", 0) or 0)
+        except Exception:
+            mcap_map[t] = 0.0
+
+    # Filter scored tickers by market cap
+    scored["market_cap"] = scored["ticker"].map(mcap_map)
+    eligible = scored[scored["market_cap"] >= min_market_cap].copy()
+    logger.info("%d tickers pass $%.0fB market cap filter", len(eligible), min_market_cap / 1e9)
+
+    # Take top_k from the filtered list
+    top_candidates = eligible.head(top_k)
+
+    # Fetch full info (close price, sector) only for the selected picks
+    top_picks: list[dict] = []
+    for _, row in top_candidates.iterrows():
+        ticker = row["ticker"]
+        mcap = row["market_cap"]
+
+        try:
+            full_info = yf.Ticker(ticker).info
+            close_price = full_info.get("previousClose") or full_info.get("regularMarketPreviousClose")
+            sector = full_info.get("sector", "N/A")
+        except Exception:
+            close_price = None
+            sector = "N/A"
+
+        regime_conf = predictor.predict_regime_confidence(
+            {col: row.get(col, 0.0) for col in predictor.feature_names}
+            if hasattr(predictor, "feature_names") else {}
+        )
+        cal_factor = predictor.ticker_calibration.get(ticker, 1.0)
+
+        top_picks.append({
+            "ticker": ticker,
+            "probability_gain": round(float(row["ensemble_score"]), 4),
+            "signal": "BUY",
+            "ensemble_score": float(row["ensemble_score"]),
+            "ltr_score": 0.0,
+            "classification_score": 0.0,
+            "volume_surge_3d": round(float(row.get("Volume_Surge_3d", 0)), 2) if pd.notna(row.get("Volume_Surge_3d")) else None,
+            "regime_confidence": round(regime_conf, 3),
+            "ticker_calibration": cal_factor,
+            "volatility_20d": round(float(row.get("Volatility_20d", 0)), 4) if pd.notna(row.get("Volatility_20d")) else None,
+            "market_cap": mcap,
+            "sector": sector,
+            "last_close": close_price,
+        })
+        logger.info("Pick %d: %s (score=%.4f, mcap=$%.1fB)", len(top_picks), ticker, row["ensemble_score"], mcap / 1e9)
+
+    logger.info("Batch scoring complete: %d picks selected from %d tickers", len(top_picks), len(all_tickers))
+    return top_picks
+
+
+def _slow_scan_tickers(
+    predictor,
+    *,
+    top_k: int = 10,
+    min_market_cap: float = 100_000_000,
+) -> list[dict]:
+    """Fallback: scan tickers one-by-one via yFinance (slow)."""
+    from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
+
+    tickers_to_scan: list[str] = list(NASDAQ_TOP_TICKERS)
+    try:
+        sp500 = _get_major_index_tickers()
+        tickers_to_scan = list(set(tickers_to_scan) | set(sp500))
+    except Exception:
+        logger.warning("Could not fetch index tickers, using NASDAQ list only")
+
+    logger.info("Slow scan: %d tickers via yFinance...", len(tickers_to_scan))
+
+    results: list[dict] = []
+    for ticker in tickers_to_scan:
+        try:
+            result = predictor.predict_ticker(ticker, min_market_cap=min_market_cap)
+            if result.get("probability_gain") is not None:
+                results.append(result)
+        except Exception:
+            continue
+
+    results.sort(key=lambda x: x.get("probability_gain", 0), reverse=True)
+    return results[:top_k]
+
 
 def _safe_sentiment(ticker: str) -> dict:
     """Fetch sentiment, returning empty dict on failure."""
