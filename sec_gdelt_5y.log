@@ -1,0 +1,11 @@
+nohup: ignoring input
+2026-05-29 05:01:40,849 Loading dataset...
+2026-05-29 05:01:47,757 Loaded fresh: 1924805 rows
+2026-05-29 05:01:48,106 Total tickers: 2199, already done: 0, remaining: 2199
+2026-05-29 05:04:05,567 Progress: 5 / 2199 tickers (0.2%)
+2026-05-29 05:06:09,924 Progress: 10 / 2199 tickers (0.5%)
+2026-05-29 05:08:17,332 Progress: 15 / 2199 tickers (0.7%)
+2026-05-29 05:10:26,844 Progress: 20 / 2199 tickers (0.9%)
+2026-05-29 05:12:53,691 Progress: 25 / 2199 tickers (1.1%)
+2026-05-29 05:12:53,691 Checkpointing at 25 tickers...
+2026-05-29 05:16:35,379 Progress: 30 / 2199 tickers (1.4%)
