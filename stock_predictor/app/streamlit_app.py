@@ -940,6 +940,44 @@ elif page == "Model Training":
                     help="Compare with Test AP",
                 )
 
+            # LTR (Learning-to-Rank) metrics
+            ltr = metrics.get("ltr", {})
+            if ltr.get("status") == "trained":
+                st.markdown("---")
+                st.markdown("**Learning-to-Rank (LambdaMART) Metrics**")
+                st.caption(
+                    "The LTR model optimizes NDCG@10 — directly ranking "
+                    "stocks within each day so the top 10 picks have the "
+                    "highest hit rate. Final score = 50% classification "
+                    "+ 50% LTR."
+                )
+                l1, l2, l3 = st.columns(3)
+                with l1:
+                    st.metric(
+                        "NDCG@10 (Test)",
+                        f"{ltr.get('ndcg10_test', 0):.4f}",
+                        help="Ranking quality of top-10 on held-out test dates",
+                    )
+                with l2:
+                    st.metric(
+                        "NDCG@10 (Train)",
+                        f"{ltr.get('ndcg10_train', 0):.4f}",
+                    )
+                with l3:
+                    st.metric(
+                        "NDCG@10 Gap",
+                        f"{ltr.get('ndcg10_gap', 0):.4f}",
+                        help="Train - Test gap (lower = less overfitting)",
+                    )
+                l4, l5 = st.columns(2)
+                with l4:
+                    st.metric("LTR Best Iteration", ltr.get("best_iteration", 0))
+                with l5:
+                    st.metric(
+                        "Date Groups (Train/Test)",
+                        f"{ltr.get('train_groups', 0)} / {ltr.get('test_groups', 0)}",
+                    )
+
         with st.expander("Full Training Configuration"):
             st.json(metrics)
 
