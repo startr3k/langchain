@@ -16,8 +16,10 @@ precision from ~58.5% (classification alone) to ~67.3%.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import platform
 from pathlib import Path
 from typing import Optional
 
@@ -211,6 +213,7 @@ THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
 LTR_MODEL_PATH = MODEL_DIR / "ltr_model.json"
 REGIME_MODEL_PATH = MODEL_DIR / "regime_model.pkl"
 TICKER_CALIBRATION_PATH = MODEL_DIR / "ticker_calibration.pkl"
+_MODEL_META_PATH = MODEL_DIR / "model_meta.json"
 
 # Ensemble weight for combining classification and LTR scores.
 # 0.0 = pure classification, 1.0 = pure LTR.
@@ -1257,7 +1260,44 @@ class StockReturnPredictor:
             logger.info(
                 "Ticker calibration saved (%d entries)", len(self.ticker_calibration),
             )
+        # Save metadata for version-mismatch detection
+        meta = {
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "joblib_version": joblib.__version__,
+        }
+        try:
+            _MODEL_META_PATH.write_text(json.dumps(meta, indent=2))
+        except Exception:
+            pass
         logger.info("Model saved to %s", MODEL_PATH)
+
+    @staticmethod
+    def _check_version_mismatch() -> str | None:
+        """Check if the saved model was created with a different Python version.
+
+        Returns a warning message if a mismatch is detected, None otherwise.
+        """
+        if not _MODEL_META_PATH.exists():
+            return None
+        try:
+            meta = json.loads(_MODEL_META_PATH.read_text())
+            saved_py = meta.get("python_version", "")
+            current_py = platform.python_version()
+            saved_major_minor = ".".join(saved_py.split(".")[:2])
+            current_major_minor = ".".join(current_py.split(".")[:2])
+            if saved_major_minor != current_major_minor:
+                return (
+                    f"Model was saved with Python {saved_py} but you are "
+                    f"running Python {current_py}. Pickle files are not "
+                    f"always compatible across Python versions. Please "
+                    f"retrain the model in your current environment "
+                    f"(use the Model Training page) or switch to "
+                    f"Python {saved_major_minor}.x."
+                )
+        except Exception:
+            pass
+        return None
 
     def load(self) -> None:
         """Load model and feature names from disk."""
@@ -1265,8 +1305,36 @@ class StockReturnPredictor:
             raise FileNotFoundError(
                 f"No saved model found at {MODEL_PATH}. Train the model first."
             )
-        self.automl = joblib.load(MODEL_PATH)
-        self.feature_names = joblib.load(FEATURE_NAMES_PATH)
+
+        # Warn about Python version mismatch before attempting to load
+        version_warning = self._check_version_mismatch()
+        if version_warning:
+            logger.warning(version_warning)
+
+        try:
+            self.automl = joblib.load(MODEL_PATH)
+        except (KeyError, Exception) as e:
+            hint = (
+                version_warning
+                or (
+                    f"This may be caused by a Python version mismatch. "
+                    f"You are running Python {platform.python_version()}. "
+                    f"Please retrain the model in your current environment "
+                    f"(use the Model Training page in Streamlit)."
+                )
+            )
+            raise RuntimeError(
+                f"Failed to load model from {MODEL_PATH}: {e}. {hint}"
+            ) from e
+
+        try:
+            self.feature_names = joblib.load(FEATURE_NAMES_PATH)
+        except (KeyError, Exception) as e:
+            raise RuntimeError(
+                f"Failed to load feature names from {FEATURE_NAMES_PATH}: {e}. "
+                f"Please retrain the model."
+            ) from e
+
         if MEDIANS_PATH.exists():
             self.feature_medians = joblib.load(MEDIANS_PATH)
         if THRESHOLD_PATH.exists():
@@ -1276,15 +1344,25 @@ class StockReturnPredictor:
             self.ltr_model.load_model(str(LTR_MODEL_PATH))
             logger.info("LTR model loaded from %s", LTR_MODEL_PATH)
         if REGIME_MODEL_PATH.exists():
-            regime_data = joblib.load(REGIME_MODEL_PATH)
-            self.regime_model = regime_data["model"]
-            self.regime_features = regime_data["features"]
-            logger.info("Regime model loaded from %s", REGIME_MODEL_PATH)
+            try:
+                regime_data = joblib.load(REGIME_MODEL_PATH)
+                self.regime_model = regime_data["model"]
+                self.regime_features = regime_data["features"]
+                logger.info("Regime model loaded from %s", REGIME_MODEL_PATH)
+            except (KeyError, Exception):
+                logger.warning(
+                    "Could not load regime model — skipping (may need retraining)"
+                )
         if TICKER_CALIBRATION_PATH.exists():
-            self.ticker_calibration = joblib.load(TICKER_CALIBRATION_PATH)
-            logger.info(
-                "Ticker calibration loaded (%d entries)", len(self.ticker_calibration),
-            )
+            try:
+                self.ticker_calibration = joblib.load(TICKER_CALIBRATION_PATH)
+                logger.info(
+                    "Ticker calibration loaded (%d entries)", len(self.ticker_calibration),
+                )
+            except (KeyError, Exception):
+                logger.warning(
+                    "Could not load ticker calibration — skipping (may need retraining)"
+                )
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 
