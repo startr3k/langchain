@@ -85,6 +85,7 @@ def run_daily_picks(
             return existing[existing["date"] == today_str]
     except Exception:
         logger.warning("Could not read existing CSV at %s — will regenerate.", csv_path)
+        csv_path.unlink(missing_ok=True)
         _ensure_csv(csv_path)
 
     predictor = StockReturnPredictor()
