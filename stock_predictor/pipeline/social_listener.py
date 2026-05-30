@@ -14,17 +14,23 @@ breakdown.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 import requests
 from textblob import TextBlob
 
 logger = logging.getLogger(__name__)
+
+# File-based cache for the eligible ticker universe.
+_TICKER_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "eligible_tickers_cache.json"
+_TICKER_CACHE_MAX_AGE_HOURS = 24  # refresh if older than this
 
 # ---------------------------------------------------------------------------
 # Dynamic index-ticker fetching (>= $1B market cap on Dow / S&P / NASDAQ)
@@ -159,16 +165,80 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
     return frozenset(filtered)
 
 
-def get_eligible_tickers() -> set[str]:
+def _load_ticker_cache() -> set[str] | None:
+    """Load cached tickers from disk if fresh enough."""
+    if not _TICKER_CACHE_PATH.exists():
+        return None
+    try:
+        data = json.loads(_TICKER_CACHE_PATH.read_text())
+        cached_at = datetime.fromisoformat(data["cached_at"])
+        age_hours = (datetime.now() - cached_at).total_seconds() / 3600
+        if age_hours > _TICKER_CACHE_MAX_AGE_HOURS:
+            logger.info("Ticker cache is %.1f hours old — will refresh", age_hours)
+            return None
+        tickers = set(data["tickers"])
+        logger.info(
+            "Loaded %d cached eligible tickers (%.1fh old)",
+            len(tickers), age_hours,
+        )
+        return tickers
+    except Exception:
+        logger.warning("Could not read ticker cache")
+        return None
+
+
+def _save_ticker_cache(tickers: set[str]) -> None:
+    """Persist the eligible ticker set to disk."""
+    try:
+        data = {
+            "cached_at": datetime.now().isoformat(),
+            "count": len(tickers),
+            "tickers": sorted(tickers),
+        }
+        _TICKER_CACHE_PATH.write_text(json.dumps(data, indent=2))
+        logger.info("Saved %d eligible tickers to cache", len(tickers))
+    except Exception:
+        logger.warning("Could not write ticker cache")
+
+
+def get_eligible_tickers(*, force_refresh: bool = False) -> set[str]:
     """Return the set of eligible tickers (Dow/S&P/NASDAQ, >= $1B market cap).
 
-    Results are cached after the first call.
+    Uses a disk-based cache (JSON file) that refreshes every 24 hours.
+    Pass ``force_refresh=True`` to bypass the cache.
     """
+    if not force_refresh:
+        cached = _load_ticker_cache()
+        if cached:
+            return cached
+
     try:
-        return set(_fetch_index_tickers_cached())
+        # Clear the lru_cache so we re-fetch from Wikipedia
+        _fetch_index_tickers_cached.cache_clear()
+        tickers = set(_fetch_index_tickers_cached())
+        _save_ticker_cache(tickers)
+        return tickers
     except Exception:
         logger.warning("Falling back to curated ticker list")
         return set(_FALLBACK_TICKERS)
+
+
+def get_ticker_cache_info() -> dict:
+    """Return metadata about the ticker cache (for UI display)."""
+    if not _TICKER_CACHE_PATH.exists():
+        return {"cached": False, "count": 0, "age_hours": None}
+    try:
+        data = json.loads(_TICKER_CACHE_PATH.read_text())
+        cached_at = datetime.fromisoformat(data["cached_at"])
+        age_hours = (datetime.now() - cached_at).total_seconds() / 3600
+        return {
+            "cached": True,
+            "count": data["count"],
+            "age_hours": round(age_hours, 1),
+            "cached_at": data["cached_at"],
+        }
+    except Exception:
+        return {"cached": False, "count": 0, "age_hours": None}
 
 
 # ---------------------------------------------------------------------------
@@ -599,4 +669,84 @@ def get_social_hottest(top_n: int = 20) -> list[dict]:
         })
 
     results.sort(key=lambda x: x["engagement_score"], reverse=True)
-    return results[:top_n]
+    top = results[:top_n]
+
+    # Persist to CSV for cross-referencing in other pages
+    if top:
+        _save_social_buzz(top)
+
+    return top
+
+
+# ---------------------------------------------------------------------------
+# Social buzz persistence
+# ---------------------------------------------------------------------------
+
+_SOCIAL_BUZZ_CSV = Path(__file__).resolve().parent.parent.parent / "social_buzz.csv"
+
+
+def _save_social_buzz(items: list[dict]) -> None:
+    """Save social buzz results to CSV (overwrites with latest snapshot)."""
+    try:
+        import pandas as pd
+
+        df = pd.DataFrame(items)
+        df.to_csv(_SOCIAL_BUZZ_CSV, index=False)
+        logger.info("Saved %d social buzz items to %s", len(items), _SOCIAL_BUZZ_CSV)
+    except Exception:
+        logger.warning("Could not save social buzz CSV")
+
+
+def get_hot_tickers() -> set[str]:
+    """Return the set of tickers currently flagged as 'hot' on social media.
+
+    Reads from the persisted social_buzz.csv.  Returns an empty set if the
+    file doesn't exist or is stale (> 24 hours old).
+    """
+    if not _SOCIAL_BUZZ_CSV.exists():
+        return set()
+    try:
+        import pandas as pd
+
+        # Check age
+        mtime = datetime.fromtimestamp(_SOCIAL_BUZZ_CSV.stat().st_mtime)
+        age_hours = (datetime.now() - mtime).total_seconds() / 3600
+        if age_hours > 24:
+            return set()
+
+        df = pd.read_csv(_SOCIAL_BUZZ_CSV)
+        return set(df["ticker"].tolist())
+    except Exception:
+        return set()
+
+
+def get_social_buzz_data() -> dict[str, dict]:
+    """Return a dict of ticker -> buzz info from the persisted CSV.
+
+    Includes sentiment, mentions, engagement, and sources for each ticker.
+    Returns empty dict if no data or stale.
+    """
+    if not _SOCIAL_BUZZ_CSV.exists():
+        return {}
+    try:
+        import pandas as pd
+
+        mtime = datetime.fromtimestamp(_SOCIAL_BUZZ_CSV.stat().st_mtime)
+        age_hours = (datetime.now() - mtime).total_seconds() / 3600
+        if age_hours > 24:
+            return {}
+
+        df = pd.read_csv(_SOCIAL_BUZZ_CSV)
+        result = {}
+        for _, row in df.iterrows():
+            result[row["ticker"]] = {
+                "mentions": int(row.get("mentions", 0)),
+                "avg_sentiment": float(row.get("avg_sentiment", 0)),
+                "sentiment_label": row.get("sentiment_label", "Neutral"),
+                "engagement_score": int(row.get("engagement_score", 0)),
+                "sources": row.get("sources", ""),
+                "last_updated": row.get("last_updated", ""),
+            }
+        return result
+    except Exception:
+        return {}

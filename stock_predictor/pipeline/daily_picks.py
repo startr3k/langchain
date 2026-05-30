@@ -328,41 +328,43 @@ def _batch_score_from_cache(
     scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
 
     import yfinance as yf
+    from stock_predictor.pipeline.social_listener import get_eligible_tickers
 
-    # Use fast_info to batch-filter by market cap (near-instant per call).
-    # Then only fetch full info for the top-K picks that pass.
+    # Use the cached eligible ticker universe (Dow/S&P/NASDAQ >= $1B)
+    # instead of querying yfinance for all 617 tickers each run.
+    eligible_set = get_eligible_tickers()
     all_tickers = scored["ticker"].tolist()
-    logger.info("Filtering %d tickers by market cap >= $%.0fB...", len(all_tickers), min_market_cap / 1e9)
+    logger.info(
+        "Filtering %d tickers against %d cached eligible tickers (>= $%.0fB)...",
+        len(all_tickers), len(eligible_set), min_market_cap / 1e9,
+    )
 
-    mcap_map: dict[str, float] = {}
-    for t in all_tickers:
-        try:
-            fi = yf.Ticker(t).fast_info
-            mcap_map[t] = float(fi.get("marketCap", 0) or 0)
-        except Exception:
-            mcap_map[t] = 0.0
+    # Fast set-based filter using the cached universe
+    scored["in_eligible_universe"] = scored["ticker"].isin(eligible_set)
+    eligible = scored[scored["in_eligible_universe"]].copy()
+    logger.info("%d tickers pass cached eligible filter", len(eligible))
 
-    # Filter scored tickers by market cap
-    scored["market_cap"] = scored["ticker"].map(mcap_map)
-    eligible = scored[scored["market_cap"] >= min_market_cap].copy()
-    logger.info("%d tickers pass $%.0fB market cap filter", len(eligible), min_market_cap / 1e9)
+    # For the selected top-K, fetch actual market cap from yfinance
+    # (only ~10 calls instead of 617)
+    scored["market_cap"] = 0.0  # placeholder
 
     # Take top_k from the filtered list
     top_candidates = eligible.head(top_k)
 
-    # Fetch full info (close price, sector) only for the selected picks
+    # Fetch full info (close price, sector, market cap) only for the selected picks
     top_picks: list[dict] = []
     for _, row in top_candidates.iterrows():
         ticker = row["ticker"]
-        mcap = row["market_cap"]
 
         try:
             full_info = yf.Ticker(ticker).info
             close_price = full_info.get("previousClose") or full_info.get("regularMarketPreviousClose")
             sector = full_info.get("sector", "N/A")
+            mcap = full_info.get("marketCap", 0) or 0
         except Exception:
             close_price = None
             sector = "N/A"
+            mcap = 0
 
         regime_conf = predictor.predict_regime_confidence(
             {col: row.get(col, 0.0) for col in predictor.feature_names}

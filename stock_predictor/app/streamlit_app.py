@@ -44,7 +44,13 @@ from stock_predictor.pipeline.scheduler import (
     get_run_log,
     restore_schedule,
 )
-from stock_predictor.pipeline.social_listener import get_social_hottest, get_eligible_tickers
+from stock_predictor.pipeline.social_listener import (
+    get_social_hottest,
+    get_eligible_tickers,
+    get_ticker_cache_info,
+    get_hot_tickers,
+    get_social_buzz_data,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -232,17 +238,45 @@ if page == "Top Recommendations":
         results.sort(key=lambda x: x["Composite Score"], reverse=True)
         top_results = results[:top_x]
 
-        st.subheader(f"Top {len(top_results)} Recommendations")
-        st.caption(
-            f"Score = {model_weight:.0%} × Model Probability + "
-            f"{sentiment_weight:.0%} × Sentiment Score"
-        )
+        # Load social buzz data for 🔥 indicator
+        hot_tickers = get_hot_tickers()
+        buzz_data = get_social_buzz_data()
 
-        display_top = [
-            {k: v for k, v in r.items() if not k.startswith("_")}
-            for r in top_results
-        ]
+        st.subheader(f"Top {len(top_results)} Recommendations")
+        if hot_tickers:
+            st.caption(
+                f"Score = {model_weight:.0%} × Model Probability + "
+                f"{sentiment_weight:.0%} × Sentiment Score  ·  "
+                f"🔥 = trending on social media ({len(hot_tickers)} hot stocks)"
+            )
+        else:
+            st.caption(
+                f"Score = {model_weight:.0%} × Model Probability + "
+                f"{sentiment_weight:.0%} × Sentiment Score  ·  "
+                "Run Social Media Listener first to see 🔥 indicators"
+            )
+
+        display_top = []
+        for r in top_results:
+            row = {k: v for k, v in r.items() if not k.startswith("_")}
+            ticker = r["Ticker"]
+            if ticker in hot_tickers:
+                row["Ticker"] = f"🔥 {ticker}"
+                buzz = buzz_data.get(ticker, {})
+                row["Social Buzz"] = buzz.get("sentiment_label", "Hot")
+            else:
+                row["Social Buzz"] = "—"
+            display_top.append(row)
+
         df = pd.DataFrame(display_top)
+        # Reorder columns to put Social Buzz after Ticker
+        cols = df.columns.tolist()
+        if "Social Buzz" in cols:
+            cols.remove("Social Buzz")
+            ticker_idx = cols.index("Ticker") + 1
+            cols.insert(ticker_idx, "Social Buzz")
+            df = df[cols]
+
         st.dataframe(
             df.style.format({
                 "Model P(≥20%)": "{:.1%}",
@@ -1329,8 +1363,23 @@ elif page == "Social Media Listener":
     )
 
     with st.expander("Eligible Ticker Universe"):
-        eligible = get_eligible_tickers()
-        st.write(f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 with ≥$1B market cap")
+        cache_info = get_ticker_cache_info()
+        col_u1, col_u2 = st.columns([3, 1])
+        with col_u1:
+            eligible = get_eligible_tickers()
+            if cache_info["cached"]:
+                st.write(
+                    f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 "
+                    f"with ≥$1B market cap (cached {cache_info['age_hours']}h ago)"
+                )
+            else:
+                st.write(f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 with ≥$1B market cap")
+        with col_u2:
+            if st.button("🔄 Refresh Tickers", key="refresh_tickers"):
+                with st.spinner("Fetching tickers from Wikipedia + yFinance..."):
+                    eligible = get_eligible_tickers(force_refresh=True)
+                st.success(f"Refreshed: {len(eligible)} eligible tickers")
+                st.rerun()
         st.caption(", ".join(sorted(eligible)[:50]) + f"... ({len(eligible)} total)")
 
     if st.button("🔄 Refresh Market Buzz Data", type="primary"):
