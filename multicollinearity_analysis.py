@@ -45,7 +45,7 @@ def load_data():
     logger.info(f"Test set: {len(test_df)} rows")
 
     X_test = test_df[available].copy()
-    y_test = (test_df["Forward_Max_Return_3M"] >= 20.0).astype(int)
+    y_test = (test_df["Forward_Max_Return_3M"] >= 0.20).astype(int)
 
     return X_test, y_test, automl, available
 
