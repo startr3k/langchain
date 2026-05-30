@@ -52,13 +52,30 @@ stock_predictor/
 
 ### Prerequisites
 - Python 3.10+
+- [Git LFS](https://git-lfs.com) (required for model and training data files)
 - OpenAI API key
 
 ### Installation
 
 ```bash
+# 1. Install Git LFS (if not already installed)
+# macOS:
+brew install git-lfs
+# Ubuntu/Debian:
+sudo apt-get install git-lfs
+
+# 2. Initialize Git LFS and pull model/data files
+git lfs install
+git lfs pull
+
+# 3. Install Python dependencies
 pip install -r requirements.txt
 ```
+
+> **Note:** The repository uses Git LFS to store large files (`.pkl` model files,
+> `.csv` training data, `.json` model configs). If you skip `git lfs pull`, these
+> files will be LFS pointer files instead of actual data, and model loading will
+> fail with `KeyError: 118`. Run `git lfs pull` to download the real files.
 
 ### Configuration
 
