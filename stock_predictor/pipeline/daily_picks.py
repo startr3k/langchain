@@ -78,10 +78,14 @@ def run_daily_picks(
     today_str = datetime.now().strftime("%Y-%m-%d")
 
     # Check if today's picks already exist
-    existing = pd.read_csv(csv_path)
-    if not existing.empty and today_str in existing["date"].values:
-        logger.info("Picks for %s already recorded — skipping.", today_str)
-        return existing[existing["date"] == today_str]
+    try:
+        existing = pd.read_csv(csv_path)
+        if "date" in existing.columns and not existing.empty and today_str in existing["date"].values:
+            logger.info("Picks for %s already recorded — skipping.", today_str)
+            return existing[existing["date"] == today_str]
+    except Exception:
+        logger.warning("Could not read existing CSV at %s — will regenerate.", csv_path)
+        _ensure_csv(csv_path)
 
     predictor = StockReturnPredictor()
     predictor.load()
@@ -170,8 +174,8 @@ def evaluate_ground_truth(
         return pd.DataFrame(columns=CSV_COLUMNS)
 
     df = pd.read_csv(csv_path)
-    if df.empty:
-        return df
+    if df.empty or "date" not in df.columns:
+        return pd.DataFrame(columns=CSV_COLUMNS)
 
     today = datetime.now()
     updated = False
@@ -236,7 +240,7 @@ def get_precision_over_time(
         return pd.DataFrame(columns=["date", "total_picks", "hits", "precision"])
 
     df = pd.read_csv(csv_path)
-    if df.empty or "hit_20pct" not in df.columns:
+    if df.empty or "date" not in df.columns or "hit_20pct" not in df.columns:
         return pd.DataFrame(columns=["date", "total_picks", "hits", "precision"])
 
     # Only include dates where ground truth has been evaluated
@@ -283,8 +287,12 @@ def _batch_score_from_cache(
     logger.info("Loading cached training data from %s ...", _TRAINING_CSV_PATH)
     cache_df = pd.read_csv(_TRAINING_CSV_PATH)
 
-    # Keep only the latest date per ticker
-    cache_df["_date"] = pd.to_datetime(cache_df["_date"])
+    # Keep only the latest date per ticker — handle both '_date' and 'date' column names
+    date_col = "_date" if "_date" in cache_df.columns else "date"
+    if date_col not in cache_df.columns:
+        logger.warning("Training CSV has no date column — falling back to slow scan")
+        return _slow_scan_tickers(predictor, top_k=top_k, min_market_cap=min_market_cap)
+    cache_df["_date"] = pd.to_datetime(cache_df[date_col])
     latest_idx = cache_df.groupby("Ticker")["_date"].idxmax()
     latest_df = cache_df.loc[latest_idx].copy().reset_index(drop=True)
     logger.info(
