@@ -174,12 +174,16 @@ if page == "Top Recommendations":
             # Composite score: weighted combination
             composite = model_weight * prob + sentiment_weight * sentiment_score
 
+            vol_surge = pred.get("volume_surge_3d")
+            vol_surge_str = f"{vol_surge:.2f}x" if vol_surge is not None else "N/A"
+
             results.append({
                 "Ticker": ticker,
                 "Model P(≥20%)": round(prob, 4),
                 "Sentiment Score": round(sentiment_score, 4),
                 "Composite Score": round(composite, 4),
                 "Signal": pred.get("signal", "HOLD"),
+                "Vol Surge 3d": vol_surge_str,
                 "Sentiment Polarity": round(mean_polarity, 3),
                 "Total Mentions": total_mentions,
                 "Reddit Mentions": reddit_count,
@@ -245,10 +249,21 @@ if page == "Top Recommendations":
                 col3.metric("Mentions", r["Total Mentions"])
                 col4.metric("Composite", f"{comp:.1%}")
 
+                # Volume surge indicator
+                vol_surge = r.get("Vol Surge 3d", "N/A")
+                col5 = st.columns(1)[0]
+                col5.metric(
+                    "Volume Surge (3d)", vol_surge,
+                    help="3-day volume relative to 20-day average",
+                )
+
                 # SHAP-based prediction explanation
                 if explanation:
                     st.markdown("---")
-                    st.markdown("**Why This Prediction** (top feature contributions)")
+                    st.markdown(
+                        "**Why This Prediction** (top feature contributions "
+                        "from classification model)"
+                    )
                     for item in explanation:
                         feat = item["feature"]
                         shap_val = item["shap_value"]
@@ -632,12 +647,18 @@ elif page == "Stock Analysis":
                 if result.get("probability_gain") is not None:
                     prob = result["probability_gain"]
                     signal = result.get("signal", "HOLD")
-                    col_a, col_b = st.columns(2)
+                    vol_surge = result.get("volume_surge_3d")
+                    col_a, col_b, col_c = st.columns(3)
                     col_a.metric(
                         "P(≥20% gain in 3M)",
                         f"{prob * 100:.1f}%",
                     )
                     col_b.metric("Signal", signal)
+                    col_c.metric(
+                        "Volume Surge (3d)",
+                        f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
+                        help="3-day volume relative to 20-day average",
+                    )
                 else:
                     st.info(result.get("error", "Prediction unavailable."))
             except FileNotFoundError:
@@ -793,6 +814,50 @@ elif page == "Model Training":
         st.markdown("---")
         st.subheader("Model Evaluation Metrics")
 
+        # --- Architecture summary ---
+        ltr = metrics.get("ltr", {})
+        if ltr.get("status") == "trained":
+            st.info(
+                "**Ensemble Architecture:** Classification (FLAML) + "
+                "Learning-to-Rank (LambdaMART) — 50/50 weighted. "
+                "The LTR model directly optimizes NDCG@10 to rank "
+                "stocks within each trading day."
+            )
+
+        # --- LTR Ranking Quality (primary) ---
+        if ltr.get("status") == "trained":
+            st.markdown("#### Ranking Quality (LTR)")
+            st.caption(
+                "The LTR model ranks stocks within each day so the "
+                "top-10 picks have the highest precision."
+            )
+            l1, l2, l3 = st.columns(3)
+            with l1:
+                st.metric(
+                    "NDCG@10 (Test)",
+                    f"{ltr.get('ndcg10_test', 0):.4f}",
+                    help="Ranking quality of top-10 on held-out test dates",
+                )
+            with l2:
+                st.metric(
+                    "NDCG@10 (Train)",
+                    f"{ltr.get('ndcg10_train', 0):.4f}",
+                )
+            with l3:
+                st.metric(
+                    "NDCG@10 Gap",
+                    f"{ltr.get('ndcg10_gap', 0):.4f}",
+                    help="Train − Test gap (lower = less overfitting)",
+                )
+            l4, l5 = st.columns(2)
+            with l4:
+                st.metric("LTR Best Iteration", ltr.get("best_iteration", 0))
+            with l5:
+                st.metric(
+                    "Date Groups (Train/Test)",
+                    f"{ltr.get('train_groups', 0)} / {ltr.get('test_groups', 0)}",
+                )
+
         # --- Top-N Precision (primary metrics) ---
         top_n = metrics.get("top_n", {})
         top_10 = top_n.get("top_10", {})
@@ -802,7 +867,7 @@ elif page == "Model Training":
         if top_10:
             st.markdown("#### Top Pick Precision (Test Set)")
             st.caption(
-                "How many of the model's highest-confidence picks actually "
+                "How many of the ensemble's highest-confidence picks actually "
                 "achieved ≥20% peak return within 3 months."
             )
             p1, p2, p3 = st.columns(3)
@@ -860,23 +925,23 @@ elif page == "Model Training":
                 picks_df = picks_df.rename(columns={
                     "rank": "Rank",
                     "ticker": "Ticker",
-                    "probability": "Model Prob",
+                    "probability": "Ensemble Score",
                     "actual_return": "Peak Return",
                     "hit": "Hit (≥20%)",
                 })
                 picks_df["Peak Return"] = picks_df["Peak Return"].apply(
                     lambda x: f"{x:.1%}" if x is not None else "N/A"
                 )
-                picks_df["Model Prob"] = picks_df["Model Prob"].apply(
+                picks_df["Ensemble Score"] = picks_df["Ensemble Score"].apply(
                     lambda x: f"{x:.1%}"
                 )
                 picks_df["Hit (≥20%)"] = picks_df["Hit (≥20%)"].apply(
-                    lambda x: "YES" if x else "NO"
+                    lambda x: "✓" if x else "✗"
                 )
                 st.dataframe(picks_df, use_container_width=True, hide_index=True)
 
-        # --- Secondary metrics (collapsible) ---
-        with st.expander("Overall Model Metrics"):
+        # --- Classification metrics (collapsible) ---
+        with st.expander("Classification Model Metrics (FLAML)"):
             m1, m2, m3, m4 = st.columns(4)
             with m1:
                 st.metric(
@@ -907,25 +972,8 @@ elif page == "Model Training":
             with o4:
                 st.metric("Accuracy", f"{metrics.get('accuracy_optimal', 0):.4f}")
 
-            # Two-stage metrics
-            prec_ts = metrics.get("precision_twostage")
-            if prec_ts is not None:
-                n_ts = metrics.get("n_predicted_twostage", 0)
-                st.markdown(
-                    f"**Two-stage (model @ {opt_thresh:.2f} + earnings "
-                    f"momentum + volume):**"
-                )
-                t1, t2, t3, t4 = st.columns(4)
-                with t1:
-                    st.metric("Precision", f"{prec_ts:.4f}")
-                with t2:
-                    st.metric("Recall", f"{metrics.get('recall_twostage', 0):.4f}")
-                with t3:
-                    st.metric("F1 Score", f"{metrics.get('f1_twostage', 0):.4f}")
-                with t4:
-                    st.metric("# Predicted Positives", f"{n_ts:,}")
-
             # Overfitting check
+            st.markdown("**Overfitting Check:**")
             m5, m6 = st.columns(2)
             with m5:
                 st.metric(
@@ -939,44 +987,6 @@ elif page == "Model Training":
                     f"{metrics.get('ap_train', 0):.4f}",
                     help="Compare with Test AP",
                 )
-
-            # LTR (Learning-to-Rank) metrics
-            ltr = metrics.get("ltr", {})
-            if ltr.get("status") == "trained":
-                st.markdown("---")
-                st.markdown("**Learning-to-Rank (LambdaMART) Metrics**")
-                st.caption(
-                    "The LTR model optimizes NDCG@10 — directly ranking "
-                    "stocks within each day so the top 10 picks have the "
-                    "highest hit rate. Final score = 50% classification "
-                    "+ 50% LTR."
-                )
-                l1, l2, l3 = st.columns(3)
-                with l1:
-                    st.metric(
-                        "NDCG@10 (Test)",
-                        f"{ltr.get('ndcg10_test', 0):.4f}",
-                        help="Ranking quality of top-10 on held-out test dates",
-                    )
-                with l2:
-                    st.metric(
-                        "NDCG@10 (Train)",
-                        f"{ltr.get('ndcg10_train', 0):.4f}",
-                    )
-                with l3:
-                    st.metric(
-                        "NDCG@10 Gap",
-                        f"{ltr.get('ndcg10_gap', 0):.4f}",
-                        help="Train - Test gap (lower = less overfitting)",
-                    )
-                l4, l5 = st.columns(2)
-                with l4:
-                    st.metric("LTR Best Iteration", ltr.get("best_iteration", 0))
-                with l5:
-                    st.metric(
-                        "Date Groups (Train/Test)",
-                        f"{ltr.get('train_groups', 0)} / {ltr.get('test_groups', 0)}",
-                    )
 
         with st.expander("Full Training Configuration"):
             st.json(metrics)
@@ -1001,9 +1011,10 @@ elif page == "Model Training":
             st.markdown("---")
             st.subheader("Feature Importances (Grouped by Correlation)")
             st.caption(
-                "Correlated features (Spearman |r| > 0.70) are summed into "
-                "concept-level groups so importance isn't diluted across "
-                "redundant features. Groups are labeled in **bold**."
+                "Classification model feature importances. Correlated features "
+                "(Spearman |r| > 0.70) are summed into concept-level groups "
+                "so importance isn't diluted across redundant features. "
+                "These features feed both the classification and LTR models."
             )
             import plotly.express as px
 
@@ -1097,7 +1108,8 @@ elif page == "Model Training":
             predictor = StockReturnPredictor()
             predictor.load()
             st.success("Trained model found and loaded successfully.")
-            st.info("Train a new model above to see detailed evaluation metrics (R², MAE, RMSE, MAPE).")
+            ltr_status = "with LTR" if predictor.ltr_model is not None else "classification only"
+            st.info(f"Model type: ensemble ({ltr_status}). Train a new model above to see detailed metrics.")
         except FileNotFoundError:
             st.warning("No trained model found. Train the model above.")
 
@@ -1133,13 +1145,17 @@ elif page == "Batch Predictions":
 
             st.subheader(f"Results ({len(results)} stocks)")
 
-            df = pd.DataFrame(results)
-            df = df.rename(columns={
-                "ticker": "Ticker",
-                "probability_gain": "P(≥20% gain)",
-                "probability_pct": "Probability %",
-                "signal": "Signal",
-            })
+            batch_rows = []
+            for r in results:
+                vol_surge = r.get("volume_surge_3d")
+                batch_rows.append({
+                    "Ticker": r["ticker"],
+                    "P(≥20% gain)": r["probability_gain"],
+                    "Probability %": r["probability_pct"],
+                    "Signal": r.get("signal", "HOLD"),
+                    "Vol Surge 3d": f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
+                })
+            df = pd.DataFrame(batch_rows)
             st.dataframe(df, use_container_width=True)
 
             buy_signals = [r for r in results if r.get("signal") == "BUY"]
@@ -1148,8 +1164,10 @@ elif page == "Batch Predictions":
                     f"Found {len(buy_signals)} stocks with BUY signal (≥50% probability of 20%+ gain)!"
                 )
                 for r in buy_signals:
+                    vol = r.get("volume_surge_3d")
+                    vol_str = f", Vol Surge: {vol:.2f}x" if vol is not None else ""
                     st.write(
-                        f"**{r['ticker']}**: {r['probability_pct']} probability of ≥20% gain"
+                        f"**{r['ticker']}**: {r['probability_pct']} probability of ≥20% gain{vol_str}"
                     )
             else:
                 st.info("No stocks with BUY signal found in this batch.")

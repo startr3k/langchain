@@ -1,19 +1,17 @@
 """AutoML model for stock return classification and ranking using FLAML + LTR.
 
 Predicts whether a stock will achieve >=20% peak return at any point
-within a 3-month window.  Uses a three-stage approach:
+within a 3-month window.  Uses a two-stage ensemble approach:
 
   Stage 1: AutoML classification model (FLAML) predicting breakout
            probability, optimized for Average Precision.
   Stage 2: Learning-to-Rank model (XGBoost LambdaMART) trained with
            NDCG@10 objective, grouping by date to directly optimize
            cross-sectional daily top-10 ranking quality.
-  Stage 3: Rule-based post-filters (positive earnings momentum and
-           3-day volume surge > 1.5x) for additional precision.
 
 The final ranking score is a 50/50 ensemble of Stage 1 probability
 and Stage 2 LTR score.  This architecture improves daily top-10
-precision from ~58.5% (classification alone) to ~67.8%.
+precision from ~58.5% (classification alone) to ~67.3%.
 """
 
 from __future__ import annotations
@@ -160,10 +158,12 @@ def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     indicators that capture multi-factor breakout patterns.
     """
     # Fundamental surprise: companies beating estimates while growing.
+    # Uses earnings growth (not revenue growth, which was dropped for
+    # negative permutation importance).
     # Fill NaN with 0 (no surprise) instead of propagating NaN from parents.
-    if "hist_revenue_growth_qoq" in df.columns and "earnings_surprise_pct" in df.columns:
+    if "hist_earnings_growth_qoq" in df.columns and "earnings_surprise_pct" in df.columns:
         df["Fundamental_Surprise"] = (
-            df["hist_revenue_growth_qoq"].fillna(0) * df["earnings_surprise_pct"].fillna(0)
+            df["hist_earnings_growth_qoq"].fillna(0) * df["earnings_surprise_pct"].fillna(0)
         )
     else:
         df["Fundamental_Surprise"] = 0.0
@@ -225,7 +225,7 @@ class StockReturnPredictor:
 
     Predicts class 1 (>=20% peak return within 3 months) vs class 0.
     Uses balanced class weights and Average Precision as metric.
-    Two-stage prediction: model probability + rule-based post-filters
+    Ensemble prediction: classification probability + LTR ranking score
     (positive earnings momentum and 3-day volume surge > 1.5x) for higher
     precision.
     """
@@ -341,9 +341,6 @@ class StockReturnPredictor:
             "Balanced class weights: neg=%.3f, pos=%.3f", weight_neg, weight_pos,
         )
 
-        # Save raw features before transforms for two-stage rule evaluation
-        raw_X = X.copy()
-
         # Semantically fill profit-related NaN values: these are NaN
         # because the company is unprofitable, not because data is
         # missing.  Using meaningful defaults preserves this signal.
@@ -357,13 +354,15 @@ class StockReturnPredictor:
         X = X.fillna(self.feature_medians)
 
         # --- Temporal train/test split to avoid data leakage ---
-        # Sort by date so split is chronological, not random
+        # Sort by date so split is chronological, not random.
+        # All arrays (X, y, df) must be reindexed together so that
+        # positional slicing (iloc[:split_idx]) is consistent.
         if "_date" in df.columns:
             date_series = pd.to_datetime(df["_date"], errors="coerce")
             sort_order = date_series.sort_values().index
-            X = X.loc[sort_order]
-            y = y.loc[sort_order]
-            raw_X = raw_X.loc[sort_order]
+            X = X.loc[sort_order].reset_index(drop=True)
+            y = y.loc[sort_order].reset_index(drop=True)
+            df = df.loc[sort_order].reset_index(drop=True)
 
         # Hold out the last 20% as a test set with a 63-day gap
         # (gap prevents overlapping forward-return windows from leaking)
@@ -581,7 +580,7 @@ class StockReturnPredictor:
         # This is the primary evaluation metric: how many of the top N
         # highest-probability picks actually achieved >=20% peak return.
         top_n_results = {}
-        test_indices = df.index[split_idx + gap_rows:len(df)]
+        test_offset = split_idx + gap_rows
         for n in (10, 20, 50):
             if len(y_proba_pos) < n:
                 continue
@@ -589,15 +588,15 @@ class StockReturnPredictor:
             top_n_hits = int(y_test.iloc[top_n_idx].sum())
             top_n_hit_rate = round(top_n_hits / n, 4)
             # Actual peak returns for top N picks
-            actual_returns = df.loc[
-                test_indices[top_n_idx], TARGET_COLUMN,
+            actual_returns = df.iloc[
+                test_offset + top_n_idx, df.columns.get_loc(TARGET_COLUMN),
             ].values
             avg_peak_return = round(float(np.nanmean(actual_returns)), 4)
             # Individual picks detail (for top 10 only)
             picks = []
             if n == 10:
                 tickers_col = (
-                    df.loc[test_indices[top_n_idx], "Ticker"].values
+                    df.iloc[test_offset + top_n_idx, df.columns.get_loc("Ticker")].values
                     if "Ticker" in df.columns
                     else [f"Stock #{i+1}" for i in range(n)]
                 )
@@ -633,27 +632,6 @@ class StockReturnPredictor:
                 avg_peak_return * 100,
             )
 
-        # --- Two-stage evaluation (model + rules) on test set ---
-        raw_X_test = raw_X.iloc[split_idx + gap_rows:]
-        em_col = raw_X_test.get("hist_earnings_growth_qoq", pd.Series(0.0, index=raw_X_test.index))
-        vs_col = raw_X_test.get("Volume_Surge_3d", pd.Series(0.0, index=raw_X_test.index))
-        rules_mask = (em_col.fillna(0) > 0) & (vs_col.fillna(0) > 1.5)
-
-        y_pred_twostage = (y_pred_optimal.astype(bool) & rules_mask.values).astype(int)
-        n_ts = int(y_pred_twostage.sum())
-        if n_ts > 0:
-            precision_ts = precision_score(y_test, y_pred_twostage, zero_division=0)
-            recall_ts = recall_score(y_test, y_pred_twostage, zero_division=0)
-            f1_ts = f1_score(y_test, y_pred_twostage, zero_division=0)
-        else:
-            precision_ts = recall_ts = f1_ts = 0.0
-
-        logger.info(
-            "Two-stage (model@%.2f + rules): precision=%.4f recall=%.4f "
-            "n_predicted=%d",
-            self.optimal_threshold, precision_ts, recall_ts, n_ts,
-        )
-
         metrics = {
             "best_estimator": self.automl.best_estimator,
             "best_config": self.automl.best_config,
@@ -673,11 +651,6 @@ class StockReturnPredictor:
             "recall_optimal": round(recall_opt, 4),
             "f1_optimal": round(f1_opt, 4),
             "accuracy_optimal": round(accuracy_opt, 4),
-            # Two-stage metrics (model @ optimal threshold + rules)
-            "precision_twostage": round(precision_ts, 4),
-            "recall_twostage": round(recall_ts, 4),
-            "f1_twostage": round(f1_ts, 4),
-            "n_predicted_twostage": n_ts,
             # Ranking metrics
             "auc_roc": round(auc, 4),
             "avg_precision": round(ap, 4),
@@ -693,11 +666,9 @@ class StockReturnPredictor:
 
         logger.info(
             "Training complete. Best: %s | Test AUC=%.4f AP=%.4f | "
-            "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | "
-            "TwoStage: prec=%.4f rec=%.4f n=%d | LR AUC=%.4f",
+            "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | LR AUC=%.4f",
             self.automl.best_estimator, auc, ap,
-            self.optimal_threshold, precision_opt, recall_opt,
-            precision_ts, recall_ts, n_ts, lr_auc,
+            self.optimal_threshold, precision_opt, recall_opt, lr_auc,
         )
         self.save()
         return metrics
@@ -905,9 +876,8 @@ class StockReturnPredictor:
     ) -> dict:
         """Predict whether a ticker will hit >=20% peak return within 3 months.
 
-        Uses two-stage filtering:
-          Stage 1: Model probability >= optimal_threshold
-          Stage 2: Positive earnings momentum AND 3-day volume surge > 1.5x
+        Uses the ensemble score (classification + LTR) to determine the
+        probability. Prediction is BUY if probability >= optimal_threshold.
 
         Args:
             ticker: Stock ticker symbol.
@@ -918,7 +888,7 @@ class StockReturnPredictor:
                 prediction. Adds ~50ms per call. Default False.
 
         Returns:
-            Dict with ticker, probability, classification, and rule checks.
+            Dict with ticker, probability, and classification.
         """
         # Market cap gate
         try:
@@ -954,18 +924,20 @@ class StockReturnPredictor:
             else []
         )
 
-        # Stage 2: rule-based post-filters on raw features
-        if isinstance(row, dict):
-            raw = row
+        prediction = 1 if probability >= self.optimal_threshold else 0
+
+        # Extract volume surge for display (informational, not a filter)
+        if isinstance(row, pd.DataFrame):
+            vol_surge = float(row["Volume_Surge_3d"].iloc[0]) if "Volume_Surge_3d" in row.columns else None
+        elif isinstance(row, dict):
+            vol_surge = row.get("Volume_Surge_3d")
         else:
-            raw = row.to_dict() if hasattr(row, "to_dict") else {}
-
-        earnings_momentum_ok = float(raw.get("hist_earnings_growth_qoq", 0) or 0) > 0
-        volume_confirmed = float(raw.get("Volume_Surge_3d", 0) or 0) > 1.5
-        rules_pass = earnings_momentum_ok and volume_confirmed
-
-        model_pass = probability >= self.optimal_threshold
-        prediction = 1 if (model_pass and rules_pass) else 0
+            vol_surge = None
+        if vol_surge is not None:
+            try:
+                vol_surge = round(float(vol_surge), 2)
+            except (ValueError, TypeError):
+                vol_surge = None
 
         return {
             "ticker": ticker,
@@ -973,10 +945,7 @@ class StockReturnPredictor:
             "probability_pct": f"{probability * 100:.1f}%",
             "prediction": prediction,
             "signal": "BUY" if prediction == 1 else "HOLD",
-            "model_pass": model_pass,
-            "earnings_momentum_ok": earnings_momentum_ok,
-            "volume_confirmed": volume_confirmed,
-            "rules_pass": rules_pass,
+            "volume_surge_3d": vol_surge,
             "market_cap": mcap,
             "min_market_cap": min_market_cap,
             "explanation": explanation,
