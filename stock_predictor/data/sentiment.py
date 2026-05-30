@@ -273,7 +273,7 @@ def get_sentiment_features(ticker: str) -> dict:
         finviz_polarities.append(item["polarity"])
         source_texts.append((
             "Finviz News",
-            item.get("title", item.get("text", ""))[:200],
+            item.get("headline", item.get("title", ""))[:200],
             round(item["polarity"], 3),
         ))
 
