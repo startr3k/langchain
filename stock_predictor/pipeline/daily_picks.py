@@ -110,8 +110,9 @@ def run_daily_picks(
         sentiment_score = sentiment_data.get("sentiment_mean_polarity", 0.0)
         sentiment_mentions = sentiment_data.get("sentiment_total_mentions", 0)
 
-        # SHAP explanations
-        shap_str = _get_shap_explanation(predictor, ticker)
+        # SHAP explanations — pass cached feature row instead of ticker string
+        feature_row = r.get("_feature_row")
+        shap_str = _get_shap_explanation(predictor, ticker, feature_row=feature_row)
 
         # Use data already fetched by _batch_score_from_cache
         close_price = r.get("last_close")
@@ -318,12 +319,9 @@ def _batch_score_from_cache(
         "ensemble_score": scores,
     })
 
-    # Merge back feature columns we need for the output
-    feature_cols = [
-        "Volume_Surge_3d", "Volatility_20d",
-    ]
-    for col in feature_cols:
-        if col in latest_df.columns:
+    # Merge back ALL feature columns (needed for SHAP explanations + output)
+    for col in latest_df.columns:
+        if col not in scored.columns and col not in ("_date",):
             scored[col] = latest_df[col].values
 
     # Sort by ensemble score descending
@@ -372,6 +370,9 @@ def _batch_score_from_cache(
         )
         cal_factor = predictor.ticker_calibration.get(ticker, 1.0)
 
+        # Build a feature dict from the cached row for SHAP explanations
+        feature_row = {col: row.get(col, 0.0) for col in predictor.feature_names if col in row.index}
+
         top_picks.append({
             "ticker": ticker,
             "probability_gain": round(float(row["ensemble_score"]), 4),
@@ -386,6 +387,7 @@ def _batch_score_from_cache(
             "market_cap": mcap,
             "sector": sector,
             "last_close": close_price,
+            "_feature_row": feature_row,
         })
         logger.info("Pick %d: %s (score=%.4f, mcap=$%.1fB)", len(top_picks), ticker, row["ensemble_score"], mcap / 1e9)
 
@@ -443,16 +445,38 @@ def _safe_stock_info(ticker: str) -> dict:
         return {}
 
 
-def _get_shap_explanation(predictor, ticker: str) -> str:
-    """Get top SHAP features as a compact string."""
+def _get_shap_explanation(
+    predictor, ticker: str, *, feature_row: dict | None = None,
+) -> str:
+    """Get top SHAP features as a compact string.
+
+    Uses the pre-computed feature row from the training cache when available,
+    falling back to building features from yFinance if not.
+    """
     try:
-        explanation = predictor.explain_prediction(ticker)
-        if explanation and "top_features" in explanation:
-            features = explanation["top_features"][:5]
-            parts = [f"{f['feature']}={f['contribution']:+.3f}" for f in features]
+        if feature_row:
+            explanation = predictor.explain_prediction(feature_row)
+        else:
+            # Fallback: build features from scratch (slow)
+            from stock_predictor.data.yfinance_client import get_stock_data
+            from stock_predictor.data.feature_engineering import compute_features
+
+            stock_data = get_stock_data(ticker, period="2y")
+            if stock_data is None or stock_data.empty:
+                return ""
+            features_df = compute_features(stock_data, ticker)
+            if features_df.empty:
+                return ""
+            explanation = predictor.explain_prediction(features_df.iloc[[-1]])
+
+        if explanation:
+            parts = [
+                f"{f['feature']}={f['shap_value']:+.3f}"
+                for f in explanation[:5]
+            ]
             return "; ".join(parts)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("SHAP explanation failed for %s: %s", ticker, exc)
     return ""
 
 

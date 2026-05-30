@@ -1322,9 +1322,10 @@ elif page == "Batch Predictions":
 elif page == "Social Media Listener":
     st.title("🔥 Social Media Listener")
     st.markdown(
-        "Top 20 hottest stocks on social media — filtered to **Dow, S&P 500, "
+        "Top 20 hottest stocks — filtered to **Dow, S&P 500, "
         "and NASDAQ** listed stocks with **≥ $1B market cap** only.  "
-        "Data sourced from Reddit finance subreddits and StockTwits."
+        "Data sourced from Reddit, Yahoo Finance (trending, most active, day movers), "
+        "Finviz news headlines, and GDELT global news."
     )
 
     with st.expander("Eligible Ticker Universe"):
@@ -1332,8 +1333,8 @@ elif page == "Social Media Listener":
         st.write(f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 with ≥$1B market cap")
         st.caption(", ".join(sorted(eligible)[:50]) + f"... ({len(eligible)} total)")
 
-    if st.button("🔄 Refresh Social Media Data", type="primary"):
-        with st.spinner("Scanning Reddit & StockTwits for trending stocks..."):
+    if st.button("🔄 Refresh Market Buzz Data", type="primary"):
+        with st.spinner("Scanning Yahoo Finance, Finviz & GDELT for trending stocks..."):
             hottest = get_social_hottest(top_n=20)
 
         if hottest:
@@ -1354,8 +1355,8 @@ elif page == "Social Media Listener":
                     "Ticker": item["ticker"],
                     "Mentions": item["mentions"],
                     "Sentiment": f"{sent_icon} {item['sentiment_label']} ({sent:+.3f})",
-                    "Upvotes": item["total_upvotes"],
-                    "Comments": item["total_comments"],
+                    "Volume": f"{item['total_upvotes']:,}" if item["total_upvotes"] else "—",
+                    "Change %": f"{item['change_pct']:+.1f}%" if item["change_pct"] else "—",
                     "Engagement": item["engagement_score"],
                     "Sources": item["sources"],
                 })

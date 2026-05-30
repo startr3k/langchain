@@ -1,8 +1,14 @@
-"""Social media listener — surfaces the top-20 hottest stocks from Reddit,
-StockTwits, and Finviz that are listed on Dow, S&P 500, or NASDAQ with
-market cap >= $1B.
+"""Social media & market buzz listener — surfaces the top-20 hottest stocks
+from Yahoo Finance, Finviz news, and GDELT that are listed on Dow, S&P 500,
+or NASDAQ with market cap >= $1B.
 
-Updated daily; results include mention counts, sentiment, and source
+Data sources:
+  - Yahoo Finance Trending (real-time trending tickers)
+  - Yahoo Finance Screeners (most active, day gainers)
+  - Finviz news headlines (sentiment via TextBlob)
+  - GDELT Global News (article volume + tone, with rate-limit fallback)
+
+Updated on demand; results include mention counts, sentiment, and source
 breakdown.
 """
 
@@ -64,7 +70,6 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
 
     tickers: set[str] = set()
 
-    # Wikipedia blocks requests without a User-Agent header.
     _wiki_headers = {"User-Agent": "StockPredictor/1.0 (python-requests)"}
 
     def _wiki_read_html(url: str, match: str) -> list[pd.DataFrame]:
@@ -126,7 +131,6 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
     filtered: set[str] = set()
     try:
         import yfinance as yf
-        # Process in batches to avoid timeout
         ticker_list = sorted(tickers)
         batch_size = 50
         for i in range(0, len(ticker_list), batch_size):
@@ -141,17 +145,15 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
                         if mcap and mcap >= MIN_MARKET_CAP:
                             filtered.add(sym)
                     except Exception:
-                        # If we can't check, include it (better to include than exclude)
                         filtered.add(sym)
             except Exception:
-                # On batch failure, include all tickers from this batch
                 filtered.update(batch)
     except ImportError:
         logger.warning("yfinance not available — skipping market cap filter")
         filtered = tickers
 
     if not filtered:
-        filtered = tickers  # Don't return empty set
+        filtered = tickers
 
     logger.info("Filtered to %d tickers with market cap >= $1B", len(filtered))
     return frozenset(filtered)
@@ -169,11 +171,9 @@ def get_eligible_tickers() -> set[str]:
         return set(_FALLBACK_TICKERS)
 
 
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
-]
+# ---------------------------------------------------------------------------
+# Common helpers
+# ---------------------------------------------------------------------------
 
 _COMMON_WORDS = {
     "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL", "CAN",
@@ -194,24 +194,34 @@ _COMMON_WORDS = {
 
 _TICKER_RE = re.compile(r"\$?([A-Z]{2,5})\b")
 
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:126.0) Gecko/20100101 Firefox/126.0",
+]
+
 
 def _get_user_agent() -> str:
     import random
     return random.choice(_USER_AGENTS)
 
 
+# ---------------------------------------------------------------------------
+# Source 1: Reddit (graceful fallback if blocked)
+# ---------------------------------------------------------------------------
+
 def scan_reddit_hot(top_n: int = 20) -> list[dict]:
     """Scan Reddit finance subreddits for trending tickers.
 
-    Returns a list of dicts: {ticker, mentions, avg_sentiment, sources}.
+    Returns a list of dicts: {ticker, score, avg_sentiment, source}.
     Only includes tickers on Dow/S&P/NASDAQ with >= $1B market cap.
+    Gracefully returns empty list if Reddit blocks the request.
     """
     from bs4 import BeautifulSoup
 
     eligible = get_eligible_tickers()
     mention_data: dict[str, dict] = {}
-    subreddits = ["wallstreetbets", "stocks", "investing", "StockMarket",
-                  "options", "pennystocks"]
+    subreddits = ["wallstreetbets", "stocks", "investing", "StockMarket"]
 
     for subreddit in subreddits:
         try:
@@ -220,6 +230,7 @@ def scan_reddit_hot(top_n: int = 20) -> list[dict]:
             time.sleep(1.5)
             resp = requests.get(url, headers=headers, params={"limit": "100"}, timeout=15)
             if resp.status_code != 200:
+                logger.debug("Reddit r/%s returned %d — skipping", subreddit, resp.status_code)
                 continue
 
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -232,9 +243,9 @@ def scan_reddit_hot(top_n: int = 20) -> list[dict]:
                 score_el = thing.find("div", class_="score unvoted")
                 score_text = score_el.get("title", "0") if score_el else "0"
                 try:
-                    score = int(score_text)
+                    post_score = int(score_text)
                 except (ValueError, TypeError):
-                    score = 0
+                    post_score = 0
 
                 comments_el = thing.find("a", class_="comments")
                 num_comments = 0
@@ -246,9 +257,7 @@ def scan_reddit_hot(top_n: int = 20) -> list[dict]:
                 matches = _TICKER_RE.findall(title)
                 for match in matches:
                     match = match.upper()
-                    if match in _COMMON_WORDS:
-                        continue
-                    if match not in eligible:
+                    if match in _COMMON_WORDS or match not in eligible:
                         continue
 
                     if match not in mention_data:
@@ -263,7 +272,7 @@ def scan_reddit_hot(top_n: int = 20) -> list[dict]:
 
                     d = mention_data[match]
                     d["mentions"] += 1
-                    d["total_score"] += score
+                    d["total_score"] += post_score
                     d["total_comments"] += num_comments
                     d["sources"].add(f"r/{subreddit}")
 
@@ -271,106 +280,320 @@ def scan_reddit_hot(top_n: int = 20) -> list[dict]:
                     d["polarities"].append(polarity)
 
         except Exception:
-            logger.exception("Error scanning r/%s", subreddit)
+            logger.debug("Error scanning r/%s — Reddit may be blocked", subreddit)
 
-    # Build results sorted by mentions
     results = []
     for ticker, d in mention_data.items():
         avg_pol = sum(d["polarities"]) / len(d["polarities"]) if d["polarities"] else 0
+        engagement = d["mentions"] * 2 + d["total_score"] + d["total_comments"]
         results.append({
             "ticker": ticker,
-            "mentions": d["mentions"],
+            "score": engagement,
             "avg_sentiment": round(avg_pol, 3),
-            "total_upvotes": d["total_score"],
-            "total_comments": d["total_comments"],
-            "engagement_score": d["mentions"] * 2 + d["total_score"] + d["total_comments"],
-            "sources": sorted(d["sources"]),
-            "source_type": "Reddit",
+            "source": "Reddit",
         })
 
-    results.sort(key=lambda x: x["engagement_score"], reverse=True)
+    results.sort(key=lambda x: x["score"], reverse=True)
+    if results:
+        logger.info("Reddit: found %d trending tickers", len(results))
+    else:
+        logger.info("Reddit: no results (may be blocked from this environment)")
     return results[:top_n]
 
 
-def scan_stocktwits_trending(top_n: int = 20) -> list[dict]:
-    """Fetch StockTwits trending tickers filtered to eligible stocks."""
-    eligible = get_eligible_tickers()
-    results = []
+# ---------------------------------------------------------------------------
+# Source 2: Yahoo Finance Trending + Screeners
+# ---------------------------------------------------------------------------
+
+_YF_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def _fetch_yahoo_trending() -> list[dict]:
+    """Fetch trending tickers from Yahoo Finance."""
+    results: list[dict] = []
     try:
-        url = "https://api.stocktwits.com/api/2/trending/symbols.json"
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(
+            "https://query2.finance.yahoo.com/v1/finance/trending/US",
+            headers=_YF_HEADERS,
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.warning("Yahoo trending returned %d", resp.status_code)
+            return results
+
+        data = resp.json()
+        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        for rank, q in enumerate(quotes, 1):
+            sym = q.get("symbol", "").upper()
+            if sym:
+                results.append({
+                    "ticker": sym,
+                    "score": max(1, 25 - rank),  # higher rank = higher score
+                    "source": "Yahoo Trending",
+                })
+    except Exception:
+        logger.exception("Error fetching Yahoo trending")
+    return results
+
+
+def _fetch_yahoo_screener(screener_id: str, label: str) -> list[dict]:
+    """Fetch a Yahoo Finance pre-defined screener (most_actives, day_gainers, etc.)."""
+    results: list[dict] = []
+    try:
+        resp = requests.get(
+            f"https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved",
+            params={"scrIds": screener_id, "count": "25"},
+            headers=_YF_HEADERS,
+            timeout=15,
+        )
         if resp.status_code != 200:
             return results
 
         data = resp.json()
-        symbols = data.get("symbols", [])
-        for sym in symbols:
-            ticker = sym.get("symbol", "").upper()
-            if ticker not in eligible:
+        quotes = data.get("finance", {}).get("result", [{}])[0].get("quotes", [])
+        for rank, q in enumerate(quotes, 1):
+            sym = q.get("symbol", "").upper()
+            mcap = q.get("marketCap", 0)
+            if sym:
+                results.append({
+                    "ticker": sym,
+                    "score": max(1, 30 - rank),
+                    "source": f"Yahoo {label}",
+                    "market_cap": mcap,
+                    "volume": q.get("regularMarketVolume", 0),
+                    "change_pct": q.get("regularMarketChangePercent", 0),
+                })
+    except Exception:
+        logger.exception("Error fetching Yahoo screener %s", screener_id)
+    return results
+
+
+def scan_yahoo_finance() -> list[dict]:
+    """Aggregate Yahoo Finance sources: trending + most active + day gainers."""
+    all_items: list[dict] = []
+    all_items.extend(_fetch_yahoo_trending())
+    all_items.extend(_fetch_yahoo_screener("most_actives", "Most Active"))
+    all_items.extend(_fetch_yahoo_screener("day_gainers", "Day Gainers"))
+    all_items.extend(_fetch_yahoo_screener("day_losers", "Day Losers"))
+    return all_items
+
+
+# ---------------------------------------------------------------------------
+# Source 2: Finviz News Headlines
+# ---------------------------------------------------------------------------
+
+def scan_finviz_news(tickers: list[str], max_tickers: int = 30) -> list[dict]:
+    """Scrape Finviz news headlines for a list of tickers, compute sentiment.
+
+    Only fetches for the first ``max_tickers`` to stay within rate limits.
+    """
+    results: list[dict] = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+
+    for ticker in tickers[:max_tickers]:
+        try:
+            from bs4 import BeautifulSoup
+
+            url = f"https://finviz.com/quote.ashx?t={ticker}"
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
                 continue
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            news_table = soup.find("table", id="news-table")
+            if not news_table:
+                continue
+
+            rows = news_table.find_all("tr")
+            headline_count = 0
+            total_polarity = 0.0
+
+            for row in rows[:20]:  # last 20 headlines
+                link = row.find("a")
+                if not link:
+                    continue
+                headline = link.get_text(strip=True)
+                polarity = TextBlob(headline).sentiment.polarity
+                total_polarity += polarity
+                headline_count += 1
+
+            if headline_count > 0:
+                results.append({
+                    "ticker": ticker,
+                    "score": headline_count,
+                    "avg_sentiment": round(total_polarity / headline_count, 3),
+                    "headline_count": headline_count,
+                    "source": "Finviz News",
+                })
+
+            time.sleep(0.3)  # gentle rate limiting
+
+        except Exception:
+            logger.debug("Finviz fetch failed for %s", ticker)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Source 3: GDELT Global News API
+# ---------------------------------------------------------------------------
+
+def scan_gdelt_news(tickers: list[str], max_tickers: int = 20) -> list[dict]:
+    """Query GDELT DOC API for news article counts and tone per ticker.
+
+    GDELT rate-limits to 1 request per 5 seconds.  If rate-limited,
+    returns whatever was collected before the limit was hit.
+    """
+    results: list[dict] = []
+
+    for ticker in tickers[:max_tickers]:
+        try:
+            time.sleep(6)  # GDELT requires >= 5s between requests
+            resp = requests.get(
+                "https://api.gdeltproject.org/api/v2/doc/doc",
+                params={
+                    "query": f"{ticker} stock",
+                    "mode": "artlist",
+                    "maxrecords": "10",
+                    "format": "json",
+                    "timespan": "24h",
+                },
+                timeout=20,
+            )
+            if resp.status_code == 429:
+                logger.warning("GDELT rate-limited — stopping after %d tickers", len(results))
+                break
+            if resp.status_code != 200:
+                continue
+
+            data = resp.json()
+            articles = data.get("articles", [])
+            if not articles:
+                continue
+
+            # Compute average tone from GDELT (range roughly -10 to +10)
+            tones = []
+            for a in articles:
+                tone_str = a.get("tone", "")
+                if tone_str:
+                    try:
+                        tone_val = float(tone_str.split(",")[0])
+                        tones.append(tone_val)
+                    except (ValueError, IndexError):
+                        pass
+
+            avg_tone = sum(tones) / len(tones) if tones else 0
+            # Normalize GDELT tone to -1..+1 scale
+            normalized_sentiment = max(-1.0, min(1.0, avg_tone / 10.0))
+
             results.append({
                 "ticker": ticker,
-                "mentions": sym.get("watchlist_count", 0),
-                "avg_sentiment": 0.0,
-                "total_upvotes": 0,
-                "total_comments": 0,
-                "engagement_score": sym.get("watchlist_count", 0),
-                "sources": ["StockTwits Trending"],
-                "source_type": "StockTwits",
+                "score": len(articles),
+                "avg_sentiment": round(normalized_sentiment, 3),
+                "article_count": len(articles),
+                "source": "GDELT News",
             })
-    except Exception:
-        logger.exception("Error fetching StockTwits trending")
 
-    return results[:top_n]
+        except Exception:
+            logger.debug("GDELT fetch failed for %s", ticker)
 
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
 
 def get_social_hottest(top_n: int = 20) -> list[dict]:
-    """Aggregate Reddit + StockTwits to find the top-N hottest stocks.
-
-    Only includes tickers listed on Dow, S&P 500, or NASDAQ with market
-    cap >= $1B.
+    """Aggregate Reddit, Yahoo Finance, Finviz, and GDELT to find the top-N
+    hottest stocks from Dow, S&P 500, and NASDAQ with >= $1B market cap.
 
     Returns a list of dicts sorted by combined engagement score:
-        {ticker, mentions, avg_sentiment, engagement_score, sources}
+        {ticker, mentions, avg_sentiment, engagement_score, sources, ...}
     """
-    reddit = scan_reddit_hot(top_n=50)
-    stocktwits = scan_stocktwits_trending(top_n=50)
+    eligible = get_eligible_tickers()
+    logger.info("Scanning %d eligible tickers for buzz...", len(eligible))
 
-    # Merge by ticker
+    # Reddit (graceful — returns empty list if blocked)
+    reddit_items = scan_reddit_hot(top_n=50)
+    logger.info("Reddit: %d trending tickers", len(reddit_items))
+
+    # Yahoo Finance
+    yahoo_items = scan_yahoo_finance()
+    logger.info("Yahoo Finance: %d raw items", len(yahoo_items))
+
+    # Identify which tickers from all sources are eligible (for Finviz deep-dive)
+    seen_tickers: list[str] = []
+    for item in reddit_items + yahoo_items:
+        if item["ticker"] in eligible and item["ticker"] not in seen_tickers:
+            seen_tickers.append(item["ticker"])
+
+    # Finviz news for top candidates
+    finviz_candidates = seen_tickers[:30]
+    finviz_items = scan_finviz_news(finviz_candidates)
+    logger.info("Finviz: %d tickers with news", len(finviz_items))
+
+    # GDELT (slow — only fetch for top candidates, skip if rate-limited)
+    gdelt_items = scan_gdelt_news(finviz_candidates[:10])
+    logger.info("GDELT: %d tickers with news", len(gdelt_items))
+
+    # Merge all sources by ticker
     merged: dict[str, dict] = {}
-    for item in reddit + stocktwits:
+
+    for item in reddit_items + yahoo_items + finviz_items + gdelt_items:
         ticker = item["ticker"]
+        if ticker not in eligible:
+            continue
+
         if ticker not in merged:
             merged[ticker] = {
                 "ticker": ticker,
                 "mentions": 0,
+                "total_score": 0,
                 "polarities": [],
-                "total_upvotes": 0,
-                "total_comments": 0,
-                "engagement_score": 0,
                 "sources": [],
+                "volume": 0,
+                "change_pct": 0.0,
+                "market_cap": 0,
             }
-        m = merged[ticker]
-        m["mentions"] += item["mentions"]
-        m["total_upvotes"] += item["total_upvotes"]
-        m["total_comments"] += item["total_comments"]
-        m["engagement_score"] += item["engagement_score"]
-        m["sources"].extend(item["sources"])
-        if item["avg_sentiment"] != 0:
-            m["polarities"].append(item["avg_sentiment"])
 
-    results = []
+        m = merged[ticker]
+        m["mentions"] += 1
+        m["total_score"] += item.get("score", 1)
+        m["sources"].append(item.get("source", "Unknown"))
+
+        sent = item.get("avg_sentiment")
+        if sent is not None and sent != 0:
+            m["polarities"].append(sent)
+
+        if item.get("volume"):
+            m["volume"] = max(m["volume"], item["volume"])
+        if item.get("change_pct"):
+            m["change_pct"] = item["change_pct"]
+        if item.get("market_cap"):
+            m["market_cap"] = max(m["market_cap"], item["market_cap"])
+
+    # Build final results
+    results: list[dict] = []
     for ticker, m in merged.items():
         avg_sent = sum(m["polarities"]) / len(m["polarities"]) if m["polarities"] else 0
-        sentiment_label = "Bullish" if avg_sent > 0.1 else ("Bearish" if avg_sent < -0.1 else "Neutral")
+        sentiment_label = (
+            "Bullish" if avg_sent > 0.1
+            else ("Bearish" if avg_sent < -0.1 else "Neutral")
+        )
+        engagement = m["total_score"] + m["mentions"] * 3
+
         results.append({
             "ticker": ticker,
             "mentions": m["mentions"],
             "avg_sentiment": round(avg_sent, 3),
             "sentiment_label": sentiment_label,
-            "total_upvotes": m["total_upvotes"],
-            "total_comments": m["total_comments"],
-            "engagement_score": m["engagement_score"],
+            "total_upvotes": m["volume"],
+            "total_comments": 0,
+            "engagement_score": engagement,
+            "change_pct": round(m["change_pct"], 2) if m["change_pct"] else 0,
+            "market_cap": m["market_cap"],
             "sources": ", ".join(sorted(set(m["sources"]))),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
         })
