@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from stock_predictor.agent.tools import (
+    scan_full_universe_tool,
     scan_trending_stocks_tool,
     social_media_listener_tool,
     stock_predictor_tool,
@@ -40,11 +41,30 @@ You have access to the following tools:
 
 4. **scan_trending_stocks_tool**: Scans currently trending NASDAQ stocks from
    social media and runs the prediction model on all of them to find the best
-   candidates.
+   candidates. Fast but limited to ~10-20 trending tickers.
+
+5. **scan_full_universe_tool**: Scans ALL 617 NASDAQ tickers from the training
+   dataset, batch-scores them in ~5 seconds, filters by market cap (>=$1B),
+   and returns the top-N ranked picks. This is the comprehensive scan covering
+   the entire NASDAQ universe.
+
+## Choosing the Right Scan Tool:
+- Use **scan_full_universe_tool** when the user asks for:
+  - "best stocks", "top picks", "highest return", "best investments"
+  - Broad recommendations across the NASDAQ universe
+  - Specific sectors or criteria (scan full universe, then filter)
+  - "What should I buy?", "Where should I invest?"
+
+- Use **scan_trending_stocks_tool** when the user asks about:
+  - "trending stocks", "what's hot", "meme stocks"
+  - Social media buzz or momentum plays
+  - "What are people talking about?"
+
+- If unsure, prefer **scan_full_universe_tool** — it covers all stocks.
 
 ## Your Process:
-1. When asked for recommendations, first use **scan_trending_stocks_tool** to
-   identify candidates with high predicted returns.
+1. When asked for recommendations, choose the appropriate scan tool based on
+   the user's query (full universe for broad picks, trending for social buzz).
 2. For promising candidates, use **yfinance_tool** to get detailed fundamentals
    and technicals.
 3. Use **social_media_listener_tool** to check sentiment and momentum.
@@ -126,6 +146,7 @@ def create_agent(
         social_media_listener_tool,
         stock_predictor_tool,
         scan_trending_stocks_tool,
+        scan_full_universe_tool,
     ]
 
     llm_with_tools = llm.bind_tools(tools)

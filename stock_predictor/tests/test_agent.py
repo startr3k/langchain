@@ -117,7 +117,7 @@ class TestAgentCreation:
         mock_chat.return_value = mock_llm
 
         llm, tools, sys_msg = create_agent(api_key="test-key")
-        assert len(tools) == 4
+        assert len(tools) == 5
         assert sys_msg.content  # System prompt not empty
 
     def test_create_agent_no_key_raises(self):

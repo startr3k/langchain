@@ -1,9 +1,11 @@
 """LangChain tools for the stock recommendation agent.
 
-Three tools:
+Five tools:
 1. YFinanceTool — fetches market data and fundamentals
 2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz
 3. StockPredictorTool — runs the AutoML model to predict 3-month returns
+4. ScanTrendingStocksTool — scans trending stocks from social media
+5. ScanFullUniverseTool — scans all 617 tickers from the training dataset
 """
 
 from __future__ import annotations
@@ -213,6 +215,97 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
             "trending_stocks_scanned": len(results),
             "predictions": results,
             "tickers_sourced_from": "Reddit + NASDAQ top by volume",
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@tool
+def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.0) -> str:
+    """Scan ALL 617 NASDAQ tickers from the training dataset and rank by predicted returns.
+
+    Uses the cached training data to batch-score every ticker in ~5 seconds,
+    then filters by market cap and returns the top-N ranked picks. This is
+    the same logic as the daily picks pipeline.
+
+    Use this tool when the user wants comprehensive "best picks" across the
+    entire NASDAQ universe — not just trending stocks.
+
+    Args:
+        top_n: Number of top picks to return (default 10).
+        min_market_cap_billions: Minimum market cap filter in billions (default 1.0).
+
+    Returns:
+        JSON with the top-N ranked stocks by ensemble score, including
+        ticker, ensemble score, and probability of >=20% gain.
+    """
+    from pathlib import Path
+
+    import pandas as pd
+
+    predictor = _get_predictor()
+
+    if not predictor.is_trained:
+        return json.dumps({
+            "error": "Model not trained yet. Please train the model first.",
+        })
+
+    training_csv = Path(__file__).resolve().parent.parent.parent / "training_data_10y_full.csv"
+    if not training_csv.exists():
+        return json.dumps({
+            "error": "Training data CSV not found. Cannot perform full universe scan.",
+        })
+
+    cache_df = pd.read_csv(training_csv)
+
+    # Keep only the latest date per ticker
+    date_col = "_date" if "_date" in cache_df.columns else "date"
+    if date_col not in cache_df.columns:
+        return json.dumps({"error": "Training CSV has no date column."})
+    cache_df["_date"] = pd.to_datetime(cache_df[date_col])
+    latest_idx = cache_df.groupby("Ticker")["_date"].idxmax()
+    latest_df = cache_df.loc[latest_idx].copy().reset_index(drop=True)
+
+    tickers = latest_df["Ticker"].values
+
+    # Batch score all tickers
+    scores = predictor.predict_batch(
+        latest_df,
+        tickers=pd.Series(tickers),
+        apply_adjustments=True,
+    )
+
+    scored = pd.DataFrame({
+        "ticker": tickers,
+        "ensemble_score": scores,
+    })
+    scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
+
+    # Filter by eligible ticker universe (>= min market cap)
+    try:
+        from stock_predictor.pipeline.social_listener import get_eligible_tickers
+        eligible_set = get_eligible_tickers()
+        scored = scored[scored["ticker"].isin(eligible_set)].reset_index(drop=True)
+    except Exception:
+        logger.warning("Could not load eligible ticker cache — returning unfiltered results")
+
+    top_picks = scored.head(top_n)
+
+    results = []
+    for _, row in top_picks.iterrows():
+        results.append({
+            "ticker": row["ticker"],
+            "ensemble_score": round(float(row["ensemble_score"]), 4),
+            "rank": len(results) + 1,
+        })
+
+    return json.dumps(
+        {
+            "total_tickers_scored": len(scored),
+            "top_picks": results,
+            "min_market_cap_filter": f"${min_market_cap_billions}B",
+            "source": "Full 617-ticker training universe",
         },
         indent=2,
         default=str,
