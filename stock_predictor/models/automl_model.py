@@ -550,6 +550,62 @@ class StockReturnPredictor:
         # --- Gain chart data (decile-based cumulative gain) ---
         gain_chart_data = _compute_gain_chart(y_test.values, y_proba_pos)
 
+        # --- Top-N precision analysis on test set ---
+        # This is the primary evaluation metric: how many of the top N
+        # highest-probability picks actually achieved >=20% peak return.
+        top_n_results = {}
+        test_indices = df.index[split_idx + gap_rows:len(df)]
+        for n in (10, 20, 50):
+            if len(y_proba_pos) < n:
+                continue
+            top_n_idx = np.argsort(-y_proba_pos)[:n]
+            top_n_hits = int(y_test.iloc[top_n_idx].sum())
+            top_n_hit_rate = round(top_n_hits / n, 4)
+            # Actual peak returns for top N picks
+            actual_returns = df.loc[
+                test_indices[top_n_idx], TARGET_COLUMN,
+            ].values
+            avg_peak_return = round(float(np.nanmean(actual_returns)), 4)
+            # Individual picks detail (for top 10 only)
+            picks = []
+            if n == 10:
+                tickers_col = (
+                    df.loc[test_indices[top_n_idx], "Ticker"].values
+                    if "Ticker" in df.columns
+                    else [f"Stock #{i+1}" for i in range(n)]
+                )
+                for rank, (idx_pos, ticker_val, ret_val) in enumerate(
+                    zip(
+                        top_n_idx,
+                        tickers_col,
+                        actual_returns,
+                    ),
+                    1,
+                ):
+                    picks.append({
+                        "rank": rank,
+                        "ticker": str(ticker_val),
+                        "probability": round(float(y_proba_pos[idx_pos]), 4),
+                        "actual_return": round(float(ret_val), 4)
+                        if not np.isnan(ret_val)
+                        else None,
+                        "hit": bool(ret_val >= CLASSIFICATION_THRESHOLD)
+                        if not np.isnan(ret_val)
+                        else False,
+                    })
+            top_n_results[f"top_{n}"] = {
+                "hits": top_n_hits,
+                "total": n,
+                "hit_rate": top_n_hit_rate,
+                "avg_peak_return": avg_peak_return,
+                "picks": picks,
+            }
+            logger.info(
+                "Top-%d precision: %d/%d (%.1f%%), avg peak return: %.1f%%",
+                n, top_n_hits, n, top_n_hit_rate * 100,
+                avg_peak_return * 100,
+            )
+
         # --- Two-stage evaluation (model + rules) on test set ---
         raw_X_test = raw_X.iloc[split_idx + gap_rows:]
         em_col = raw_X_test.get("hist_earnings_growth_qoq", pd.Series(0.0, index=raw_X_test.index))
@@ -604,6 +660,7 @@ class StockReturnPredictor:
             "lr_accuracy": round(lr_accuracy, 4),
             "lr_auc": round(lr_auc, 4),
             "gain_chart": gain_chart_data,
+            "top_n": top_n_results,
         }
 
         logger.info(
