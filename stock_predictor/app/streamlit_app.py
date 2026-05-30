@@ -1384,67 +1384,13 @@ elif page == "Social Media Listener":
 elif page == "Daily Picks Pipeline":
     st.title("📋 Daily Picks Pipeline (MLOps)")
     st.markdown(
-        "Run the daily pipeline to record top-10 stock picks with model "
-        "predictions, SHAP explanations, and sentiment scores.  Use the "
-        "ground-truth evaluator to check whether past picks achieved ≥20% "
-        "upside."
+        "Schedule automated daily stock pick generation.  The pipeline "
+        "scores all tickers from the training universe, filters by market "
+        "cap, and records the top picks with SHAP explanations and sentiment "
+        "to a CSV.  Use the ground-truth evaluator to track precision over time."
     )
 
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Generate Daily Picks")
-        top_k_pipe = st.selectbox("Top picks to record", [5, 10, 20], index=1, key="pipe_topk")
-        min_mcap = st.selectbox(
-            "Min market cap",
-            [("$100M", 100_000_000), ("$500M", 500_000_000), ("$1B", 1_000_000_000)],
-            format_func=lambda x: x[0],
-            index=0,
-            key="pipe_mcap",
-        )
-
-        if st.button("▶️ Run Daily Pipeline", type="primary"):
-            with st.spinner("Running daily picks pipeline... This may take a few minutes."):
-                try:
-                    df_picks = run_daily_picks(top_k=top_k_pipe, min_market_cap=min_mcap[1])
-                    if df_picks.empty:
-                        st.warning("No picks generated (may already exist for today).")
-                    else:
-                        st.success(f"Recorded {len(df_picks)} picks!")
-                        st.dataframe(df_picks, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Pipeline error: {e}")
-
-    with col2:
-        st.subheader("Evaluate Ground Truth")
-        st.markdown(
-            "Check all historical picks for ≥20% upside from the recorded "
-            "closing price to date.  Updates existing records only if the "
-            "new upside is higher."
-        )
-        if st.button("🔍 Evaluate Ground Truth"):
-            with st.spinner("Checking price history for all recorded picks..."):
-                try:
-                    df_gt = evaluate_ground_truth()
-                    if df_gt.empty:
-                        st.info("No picks recorded yet.")
-                    else:
-                        evaluated = df_gt[df_gt["hit_20pct"].notna()]
-                        if evaluated.empty:
-                            st.info("No picks old enough to evaluate yet.")
-                        else:
-                            hits = int(evaluated["hit_20pct"].sum())
-                            total = len(evaluated)
-                            prec = hits / total if total > 0 else 0
-                            st.metric("Overall Precision", f"{prec:.1%}", f"{hits}/{total} hits")
-                            st.dataframe(evaluated[["date", "ticker", "probability", "close_price",
-                                                     "max_upside_pct", "hit_20pct"]],
-                                         use_container_width=True)
-                except Exception as e:
-                    st.error(f"Evaluation error: {e}")
-
-    # -- Scheduler section ------------------------------------------------
-    st.markdown("---")
+    # -- Scheduler section (primary control) ------------------------------
     st.subheader("⏰ Schedule Pipeline")
 
     sched_cfg = get_schedule_config()
@@ -1516,6 +1462,35 @@ elif page == "Daily Picks Pipeline":
         with st.expander(f"Scheduler Run History ({len(run_log)} runs)"):
             log_df = pd.DataFrame(run_log)
             st.dataframe(log_df, use_container_width=True)
+
+    # -- Ground truth evaluation ------------------------------------------
+    st.markdown("---")
+    st.subheader("🔍 Evaluate Ground Truth")
+    st.markdown(
+        "Check all historical picks for ≥20% upside from the recorded "
+        "closing price to date.  Updates existing records only if the "
+        "new upside is higher."
+    )
+    if st.button("🔍 Evaluate Ground Truth"):
+        with st.spinner("Checking price history for all recorded picks..."):
+            try:
+                df_gt = evaluate_ground_truth()
+                if df_gt.empty:
+                    st.info("No picks recorded yet.")
+                else:
+                    evaluated = df_gt[df_gt["hit_20pct"].notna()]
+                    if evaluated.empty:
+                        st.info("No picks old enough to evaluate yet.")
+                    else:
+                        hits = int(evaluated["hit_20pct"].sum())
+                        total = len(evaluated)
+                        prec = hits / total if total > 0 else 0
+                        st.metric("Overall Precision", f"{prec:.1%}", f"{hits}/{total} hits")
+                        st.dataframe(evaluated[["date", "ticker", "probability", "close_price",
+                                                 "max_upside_pct", "hit_20pct"]],
+                                     use_container_width=True)
+            except Exception as e:
+                st.error(f"Evaluation error: {e}")
 
     # Show precision over time if data exists
     st.markdown("---")
