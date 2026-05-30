@@ -177,6 +177,9 @@ if page == "Top Recommendations":
             vol_surge = pred.get("volume_surge_3d")
             vol_surge_str = f"{vol_surge:.2f}x" if vol_surge is not None else "N/A"
 
+            regime_conf = pred.get("regime_confidence", 0.5)
+            ticker_cal = pred.get("ticker_calibration", 1.0)
+
             results.append({
                 "Ticker": ticker,
                 "Model P(≥20%)": round(prob, 4),
@@ -184,6 +187,8 @@ if page == "Top Recommendations":
                 "Composite Score": round(composite, 4),
                 "Signal": pred.get("signal", "HOLD"),
                 "Vol Surge 3d": vol_surge_str,
+                "Regime Confidence": regime_conf,
+                "Ticker Calibration": ticker_cal,
                 "Sentiment Polarity": round(mean_polarity, 3),
                 "Total Mentions": total_mentions,
                 "Reddit Mentions": reddit_count,
@@ -249,13 +254,25 @@ if page == "Top Recommendations":
                 col3.metric("Mentions", r["Total Mentions"])
                 col4.metric("Composite", f"{comp:.1%}")
 
-                # Volume surge indicator
+                # Volume surge and regime indicators
                 vol_surge = r.get("Vol Surge 3d", "N/A")
-                col5 = st.columns(1)[0]
+                regime_conf = r.get("Regime Confidence", "N/A")
+                ticker_cal = r.get("Ticker Calibration", 1.0)
+                col5, col6, col7 = st.columns(3)
                 col5.metric(
                     "Volume Surge (3d)", vol_surge,
                     help="3-day volume relative to 20-day average",
                 )
+                if regime_conf != "N/A":
+                    col6.metric(
+                        "Regime Confidence", f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
+                        help="Market regime model's predicted daily hit rate",
+                    )
+                if ticker_cal != 1.0 and ticker_cal is not None:
+                    col7.metric(
+                        "Ticker Calibration", f"{ticker_cal:.2f}",
+                        help="Calibration factor (<1.0 = historically underperforms in top picks)",
+                    )
 
                 # SHAP-based prediction explanation
                 if explanation:
@@ -648,6 +665,8 @@ elif page == "Stock Analysis":
                     prob = result["probability_gain"]
                     signal = result.get("signal", "HOLD")
                     vol_surge = result.get("volume_surge_3d")
+                    regime = result.get("regime_confidence", 0.5)
+                    cal = result.get("ticker_calibration", 1.0)
                     col_a, col_b, col_c = st.columns(3)
                     col_a.metric(
                         "P(≥20% gain in 3M)",
@@ -659,6 +678,18 @@ elif page == "Stock Analysis":
                         f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
                         help="3-day volume relative to 20-day average",
                     )
+                    col_d, col_e = st.columns(2)
+                    col_d.metric(
+                        "Regime Confidence",
+                        f"{regime:.0%}",
+                        help="Market regime model's predicted daily hit rate",
+                    )
+                    if cal < 1.0:
+                        col_e.metric(
+                            "Ticker Calibration",
+                            f"{cal:.2f}",
+                            help="Historical accuracy factor (<1.0 = underperforms in top picks)",
+                        )
                 else:
                     st.info(result.get("error", "Prediction unavailable."))
             except FileNotFoundError:
@@ -940,6 +971,67 @@ elif page == "Model Training":
                 )
                 st.dataframe(picks_df, use_container_width=True, hide_index=True)
 
+        # --- Market Regime & Ticker Calibration ---
+        regime = metrics.get("regime", {})
+        ticker_cal = metrics.get("ticker_calibration", {})
+
+        if regime.get("status") == "trained" or ticker_cal.get("status") == "trained":
+            st.markdown("#### Precision Enhancement Models")
+
+        if regime.get("status") == "trained":
+            with st.expander("Market Regime Detection", expanded=False):
+                st.caption(
+                    "Predicts daily hit rate from macro conditions "
+                    "(VIX, market returns, yield curve). Used to flag "
+                    "low-confidence days."
+                )
+                rc1, rc2, rc3 = st.columns(3)
+                with rc1:
+                    st.metric("R² (Test)", f"{regime.get('r2_test', 0):.4f}")
+                with rc2:
+                    st.metric("R² (Train)", f"{regime.get('r2_train', 0):.4f}")
+                with rc3:
+                    st.metric(
+                        "R² Gap (Overfitting)",
+                        f"{regime.get('r2_gap', 0):.4f}",
+                        help="Train − Test gap (lower = less overfitting)",
+                    )
+                st.caption(
+                    f"Training days: {regime.get('n_train_days', 0)} | "
+                    f"Test days: {regime.get('n_test_days', 0)} | "
+                    f"Features: {', '.join(regime.get('features', []))}"
+                )
+
+        if ticker_cal.get("status") == "trained":
+            with st.expander("Per-Ticker Calibration", expanded=False):
+                st.caption(
+                    "Tracks each ticker's historical hit rate in top-10 "
+                    "picks and penalizes repeat false positives (hit rate <30%)."
+                )
+                tc1, tc2 = st.columns(2)
+                with tc1:
+                    st.metric(
+                        "Tickers Tracked",
+                        ticker_cal.get("tickers_tracked", 0),
+                    )
+                with tc2:
+                    st.metric(
+                        "Tickers Penalized",
+                        ticker_cal.get("tickers_penalized", 0),
+                        help="Tickers with <30% hit rate in top-10 appearances",
+                    )
+                penalized = ticker_cal.get("penalized_tickers", {})
+                if penalized:
+                    st.markdown("**Penalized Tickers (lowest calibration factors):**")
+                    pen_rows = [
+                        {"Ticker": t, "Calibration Factor": f}
+                        for t, f in penalized.items()
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(pen_rows),
+                        use_container_width=True, hide_index=True,
+                    )
+
         # --- Classification metrics (collapsible) ---
         with st.expander("Classification Model Metrics (FLAML)"):
             m1, m2, m3, m4 = st.columns(4)
@@ -1126,6 +1218,8 @@ elif page == "Batch Predictions":
         value=", ".join(NASDAQ_TOP_TICKERS[:20]),
     )
 
+    top_k = st.selectbox("Top picks to highlight", [5, 10, 20], index=0)
+
     if st.button("Run Predictions", type="primary"):
         tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
 
@@ -1143,32 +1237,57 @@ elif page == "Batch Predictions":
 
             results.sort(key=lambda x: x["probability_gain"], reverse=True)
 
-            st.subheader(f"Results ({len(results)} stocks)")
-
-            batch_rows = []
-            for r in results:
+            # --- Top-K picks ---
+            st.subheader(f"Top {top_k} Picks")
+            top_picks = results[:top_k]
+            top_rows = []
+            for rank, r in enumerate(top_picks, 1):
                 vol_surge = r.get("volume_surge_3d")
-                batch_rows.append({
+                regime = r.get("regime_confidence", 0.5)
+                cal = r.get("ticker_calibration", 1.0)
+                top_rows.append({
+                    "Rank": rank,
                     "Ticker": r["ticker"],
                     "P(≥20% gain)": r["probability_gain"],
                     "Probability %": r["probability_pct"],
                     "Signal": r.get("signal", "HOLD"),
                     "Vol Surge 3d": f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
+                    "Regime Conf.": f"{regime:.0%}",
+                    "Calibration": f"{cal:.2f}" if cal < 1.0 else "—",
                 })
-            df = pd.DataFrame(batch_rows)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(pd.DataFrame(top_rows), use_container_width=True)
+
+            # Regime confidence indicator
+            if top_picks:
+                avg_regime = sum(r.get("regime_confidence", 0.5) for r in top_picks) / len(top_picks)
+                if avg_regime >= 0.6:
+                    st.success(f"Market Regime: Favorable ({avg_regime:.0%} confidence)")
+                elif avg_regime >= 0.4:
+                    st.info(f"Market Regime: Neutral ({avg_regime:.0%} confidence)")
+                else:
+                    st.warning(f"Market Regime: Unfavorable ({avg_regime:.0%} confidence) — picks may underperform")
+
+            # --- Full results ---
+            with st.expander(f"All Results ({len(results)} stocks)"):
+                batch_rows = []
+                for r in results:
+                    vol_surge = r.get("volume_surge_3d")
+                    cal = r.get("ticker_calibration", 1.0)
+                    batch_rows.append({
+                        "Ticker": r["ticker"],
+                        "P(≥20% gain)": r["probability_gain"],
+                        "Probability %": r["probability_pct"],
+                        "Signal": r.get("signal", "HOLD"),
+                        "Vol Surge 3d": f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
+                        "Calibration": f"{cal:.2f}" if cal < 1.0 else "—",
+                    })
+                st.dataframe(pd.DataFrame(batch_rows), use_container_width=True)
 
             buy_signals = [r for r in results if r.get("signal") == "BUY"]
             if buy_signals:
                 st.success(
                     f"Found {len(buy_signals)} stocks with BUY signal (≥50% probability of 20%+ gain)!"
                 )
-                for r in buy_signals:
-                    vol = r.get("volume_surge_3d")
-                    vol_str = f", Vol Surge: {vol:.2f}x" if vol is not None else ""
-                    st.write(
-                        f"**{r['ticker']}**: {r['probability_pct']} probability of ≥20% gain{vol_str}"
-                    )
             else:
                 st.info("No stocks with BUY signal found in this batch.")
 

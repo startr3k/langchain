@@ -209,10 +209,20 @@ FEATURE_NAMES_PATH = MODEL_DIR / "feature_names.pkl"
 MEDIANS_PATH = MODEL_DIR / "feature_medians.pkl"
 THRESHOLD_PATH = MODEL_DIR / "optimal_threshold.pkl"
 LTR_MODEL_PATH = MODEL_DIR / "ltr_model.json"
+REGIME_MODEL_PATH = MODEL_DIR / "regime_model.pkl"
+TICKER_CALIBRATION_PATH = MODEL_DIR / "ticker_calibration.pkl"
 
 # Ensemble weight for combining classification and LTR scores.
 # 0.0 = pure classification, 1.0 = pure LTR.
 LTR_ENSEMBLE_WEIGHT = 0.5
+
+# Volatility-aware scoring: multiply ranking score by
+# (1 + VOLATILITY_SCORE_ALPHA * percentile_rank_of_volatility).
+# Higher-volatility stocks are more likely to achieve >=20% breakouts.
+VOLATILITY_SCORE_ALPHA = 0.3
+
+# Default number of top picks to highlight.
+DEFAULT_TOP_K = 5
 
 
 # Classification threshold: predict class 1 when the stock achieves
@@ -221,13 +231,13 @@ CLASSIFICATION_THRESHOLD = 0.20
 
 
 class StockReturnPredictor:
-    """AutoML-based stock return classifier.
+    """AutoML-based stock return classifier with LTR ensemble.
 
     Predicts class 1 (>=20% peak return within 3 months) vs class 0.
     Uses balanced class weights and Average Precision as metric.
-    Ensemble prediction: classification probability + LTR ranking score
-    (positive earnings momentum and 3-day volume surge > 1.5x) for higher
-    precision.
+    Ensemble prediction: classification probability + LTR ranking score,
+    with volatility-aware scoring, market regime detection, and
+    per-ticker calibration for maximum top-K precision.
     """
 
     def __init__(self) -> None:
@@ -237,6 +247,8 @@ class StockReturnPredictor:
         self.optimal_threshold: float = 0.5
         self.is_trained = False
         self.ltr_model: xgb.Booster | None = None
+        self.regime_model: Optional[object] = None
+        self.ticker_calibration: dict[str, float] = {}
 
     def train(
         self,
@@ -664,6 +676,18 @@ class StockReturnPredictor:
             "ltr": ltr_metrics,
         }
 
+        # --- Market Regime Detection ---
+        regime_metrics = self._train_regime_model(
+            df, X, y, split_idx, gap_rows,
+        )
+        metrics["regime"] = regime_metrics
+
+        # --- Per-Ticker Calibration ---
+        ticker_cal_metrics = self._train_ticker_calibration(
+            df, X, y, split_idx, gap_rows,
+        )
+        metrics["ticker_calibration"] = ticker_cal_metrics
+
         logger.info(
             "Training complete. Best: %s | Test AUC=%.4f AP=%.4f | "
             "Threshold=%.4f | Prec@opt=%.4f Rec@opt=%.4f | LR AUC=%.4f",
@@ -776,6 +800,230 @@ class StockReturnPredictor:
             "test_groups": len(test_groups),
         }
 
+    def _train_regime_model(
+        self,
+        df: pd.DataFrame,
+        X: pd.DataFrame,
+        y: pd.Series,
+        split_idx: int,
+        gap_rows: int,
+    ) -> dict:
+        """Train a market regime meta-model that predicts daily hit-rate.
+
+        Uses macro features (VIX, market returns, yield curve) to predict
+        whether the current market environment is favorable for breakout
+        picks.  The regime confidence is used to adjust ranking scores.
+
+        Returns:
+            Dict with regime model metrics.
+        """
+        if "_date" not in df.columns:
+            return {"status": "skipped"}
+
+        from sklearn.ensemble import GradientBoostingRegressor
+
+        # Compute daily hit rates from training data
+        train_df = df.iloc[:split_idx].copy()
+        train_X = X.iloc[:split_idx].copy()
+        train_y = y.iloc[:split_idx].copy()
+
+        # Get classification probabilities for training data
+        try:
+            train_proba = self.automl.predict_proba(train_X)
+            if train_proba.ndim == 2:
+                train_proba = train_proba[:, 1]
+        except Exception:
+            logger.warning("Could not predict on training data for regime model.")
+            return {"status": "skipped"}
+
+        train_df = train_df.copy()
+        train_df["_proba"] = train_proba
+        train_df["_y"] = train_y.values
+
+        # Macro features for regime detection
+        regime_features = [
+            "vix_close", "sp500_return_20d", "sp500_return_60d",
+            "sp500_volatility_20d", "yield_curve_spread",
+            "treasury_3m", "dollar_index_return_20d",
+        ]
+        regime_features = [f for f in regime_features if f in df.columns]
+        if len(regime_features) < 3:
+            logger.warning("Insufficient macro features for regime model.")
+            return {"status": "skipped"}
+
+        # Compute daily hit rate: for each date, take top 10 by proba,
+        # compute what fraction are actual positives
+        daily_stats = []
+        for date, grp in train_df.groupby("_date"):
+            if len(grp) < 10:
+                continue
+            top10_idx = grp["_proba"].nlargest(10).index
+            hit_rate = float(grp.loc[top10_idx, "_y"].mean())
+            # Use mean of macro features for that day
+            macro_vals = grp[regime_features].iloc[0].to_dict()
+            macro_vals["_hit_rate"] = hit_rate
+            daily_stats.append(macro_vals)
+
+        if len(daily_stats) < 50:
+            logger.warning("Too few training dates for regime model (%d).", len(daily_stats))
+            return {"status": "skipped"}
+
+        regime_df = pd.DataFrame(daily_stats)
+        X_regime = regime_df[regime_features].fillna(0)
+        y_regime = regime_df["_hit_rate"]
+
+        # Train/test split (last 20%)
+        r_split = int(len(X_regime) * 0.8)
+        X_r_train, X_r_test = X_regime.iloc[:r_split], X_regime.iloc[r_split:]
+        y_r_train, y_r_test = y_regime.iloc[:r_split], y_regime.iloc[r_split:]
+
+        self.regime_model = GradientBoostingRegressor(
+            n_estimators=50, max_depth=2, learning_rate=0.02,
+            min_samples_leaf=20, subsample=0.7, random_state=42,
+        )
+        self.regime_model.fit(X_r_train, y_r_train)
+        self.regime_features = regime_features
+
+        train_r2 = self.regime_model.score(X_r_train, y_r_train)
+        test_r2 = self.regime_model.score(X_r_test, y_r_test)
+
+        logger.info(
+            "Regime model trained: R² train=%.4f test=%.4f (gap=%.4f)",
+            train_r2, test_r2, train_r2 - test_r2,
+        )
+
+        # Discard if test R² < 0 (worse than predicting the mean)
+        if test_r2 < 0:
+            logger.warning(
+                "Regime model has negative test R² (%.4f) — discarding. "
+                "Model is overfitting on %d training days.",
+                test_r2, r_split,
+            )
+            self.regime_model = None
+            self.regime_features = []
+            return {
+                "status": "discarded",
+                "reason": "negative_test_r2",
+                "r2_train": round(train_r2, 4),
+                "r2_test": round(test_r2, 4),
+                "r2_gap": round(train_r2 - test_r2, 4),
+                "n_train_days": r_split,
+                "n_test_days": len(X_regime) - r_split,
+            }
+
+        return {
+            "status": "trained",
+            "r2_train": round(train_r2, 4),
+            "r2_test": round(test_r2, 4),
+            "r2_gap": round(train_r2 - test_r2, 4),
+            "n_train_days": r_split,
+            "n_test_days": len(X_regime) - r_split,
+            "features": regime_features,
+        }
+
+    def _train_ticker_calibration(
+        self,
+        df: pd.DataFrame,
+        X: pd.DataFrame,
+        y: pd.Series,
+        split_idx: int,
+        gap_rows: int,
+    ) -> dict:
+        """Compute per-ticker calibration factors from training data.
+
+        Tracks how often each ticker appears in the top-10 predictions
+        and what its hit rate is.  Tickers with <30% hit rate get
+        down-weighted to reduce repeat false positives.
+
+        Returns:
+            Dict with calibration metrics.
+        """
+        if "_date" not in df.columns or "Ticker" not in df.columns:
+            return {"status": "skipped"}
+
+        train_df = df.iloc[:split_idx].copy()
+        train_X = X.iloc[:split_idx].copy()
+        train_y = y.iloc[:split_idx].copy()
+
+        try:
+            train_proba = self.automl.predict_proba(train_X)
+            if train_proba.ndim == 2:
+                train_proba = train_proba[:, 1]
+        except Exception:
+            return {"status": "skipped"}
+
+        train_df = train_df.copy()
+        train_df["_proba"] = train_proba
+        train_df["_y"] = train_y.values
+
+        # Track per-ticker top-10 appearances and hits
+        ticker_stats: dict[str, dict] = {}
+        for date, grp in train_df.groupby("_date"):
+            if len(grp) < 10:
+                continue
+            top10_idx = grp["_proba"].nlargest(10).index
+            top10 = grp.loc[top10_idx]
+            for _, row in top10.iterrows():
+                ticker = row["Ticker"]
+                if ticker not in ticker_stats:
+                    ticker_stats[ticker] = {"appearances": 0, "hits": 0}
+                ticker_stats[ticker]["appearances"] += 1
+                ticker_stats[ticker]["hits"] += int(row["_y"])
+
+        # Compute calibration factor:
+        # - Tickers with >=5 appearances and <30% hit rate get penalized
+        # - Factor = max(0.5, hit_rate / 0.5) capped at 1.0
+        # - Tickers with few appearances get factor 1.0 (no adjustment)
+        self.ticker_calibration = {}
+        penalized = 0
+        for ticker, stats in ticker_stats.items():
+            if stats["appearances"] >= 5:
+                hit_rate = stats["hits"] / stats["appearances"]
+                if hit_rate < 0.30:
+                    factor = max(0.5, hit_rate / 0.50)
+                    self.ticker_calibration[ticker] = round(factor, 3)
+                    penalized += 1
+
+        logger.info(
+            "Ticker calibration: %d tickers tracked, %d penalized (hit rate <30%%)",
+            len(ticker_stats), penalized,
+        )
+
+        return {
+            "status": "trained",
+            "tickers_tracked": len(ticker_stats),
+            "tickers_penalized": penalized,
+            "penalized_tickers": {
+                t: f for t, f in sorted(
+                    self.ticker_calibration.items(), key=lambda x: x[1],
+                )[:10]
+            },
+        }
+
+    def predict_regime_confidence(self, features: dict | pd.DataFrame) -> float:
+        """Predict market regime confidence (expected daily hit rate).
+
+        Returns a value in [0, 1] representing expected hit rate for
+        the current market conditions.  Returns 0.5 if no regime model.
+        """
+        if self.regime_model is None:
+            return 0.5
+
+        if isinstance(features, dict):
+            row = features
+        elif isinstance(features, pd.DataFrame):
+            row = features.iloc[0].to_dict() if len(features) > 0 else {}
+        else:
+            return 0.5
+
+        regime_features = getattr(self, "regime_features", [])
+        x = np.array([[row.get(f, 0.0) for f in regime_features]])
+        try:
+            confidence = float(self.regime_model.predict(x)[0])
+            return max(0.0, min(1.0, confidence))
+        except Exception:
+            return 0.5
+
     def predict(self, features: dict | pd.DataFrame) -> float:
         """Predict probability of >=20% peak return within 3 months.
 
@@ -824,21 +1072,34 @@ class StockReturnPredictor:
 
         return cls_score
 
-    def predict_batch(self, df: pd.DataFrame) -> np.ndarray:
-        """Score multiple rows, returning ensemble scores for ranking.
+    def predict_batch(
+        self,
+        df: pd.DataFrame,
+        tickers: pd.Series | None = None,
+        apply_adjustments: bool = True,
+    ) -> np.ndarray:
+        """Score multiple rows, returning adjusted ensemble scores for ranking.
 
-        Uses the classification probability + LTR ranking score ensemble.
-        Rows should already have feature columns matching self.feature_names.
+        Uses the classification probability + LTR ranking score ensemble,
+        then applies volatility-aware scoring and per-ticker calibration
+        when ``apply_adjustments`` is True.
 
         Args:
             df: DataFrame with feature columns. Will be preprocessed
                 (derived features, semantic NaN, log transform, median fill).
+            tickers: Optional series of ticker symbols for per-ticker
+                calibration. Must be same length as df.
+            apply_adjustments: Whether to apply volatility scoring and
+                ticker calibration (default True).
 
         Returns:
             Array of ensemble scores, one per row.
         """
         if not self.is_trained:
             self.load()
+
+        # Keep raw volatility before feature preprocessing
+        raw_vol = df["Volatility_20d"].values.copy() if "Volatility_20d" in df.columns else None
 
         df = df.copy()
         df = _compute_derived_features(df)
@@ -864,9 +1125,24 @@ class StockReturnPredictor:
             ltr_scores = self.ltr_model.predict(dmat)
             ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores))
             w = LTR_ENSEMBLE_WEIGHT
-            return (1 - w) * cls_scores + w * ltr_norm
+            scores = (1 - w) * cls_scores + w * ltr_norm
+        else:
+            scores = cls_scores.copy()
 
-        return cls_scores
+        if apply_adjustments:
+            # Volatility-aware scoring: boost higher-volatility stocks
+            if raw_vol is not None and len(raw_vol) > 1:
+                vol_pctl = pd.Series(raw_vol).rank(pct=True).values
+                scores = scores * (1 + VOLATILITY_SCORE_ALPHA * vol_pctl)
+
+            # Per-ticker calibration: penalize repeat false positives
+            if tickers is not None and self.ticker_calibration:
+                cal_factors = np.array([
+                    self.ticker_calibration.get(t, 1.0) for t in tickers
+                ])
+                scores = scores * cal_factors
+
+        return scores
 
     def predict_ticker(
         self,
@@ -939,6 +1215,12 @@ class StockReturnPredictor:
             except (ValueError, TypeError):
                 vol_surge = None
 
+        # Market regime confidence
+        regime_conf = self.predict_regime_confidence(row)
+
+        # Ticker calibration factor
+        cal_factor = self.ticker_calibration.get(ticker, 1.0)
+
         return {
             "ticker": ticker,
             "probability_gain": round(probability, 4),
@@ -946,6 +1228,8 @@ class StockReturnPredictor:
             "prediction": prediction,
             "signal": "BUY" if prediction == 1 else "HOLD",
             "volume_surge_3d": vol_surge,
+            "regime_confidence": round(regime_conf, 3),
+            "ticker_calibration": cal_factor,
             "market_cap": mcap,
             "min_market_cap": min_market_cap,
             "explanation": explanation,
@@ -961,6 +1245,18 @@ class StockReturnPredictor:
         if self.ltr_model is not None:
             self.ltr_model.save_model(str(LTR_MODEL_PATH))
             logger.info("LTR model saved to %s", LTR_MODEL_PATH)
+        if self.regime_model is not None:
+            regime_data = {
+                "model": self.regime_model,
+                "features": getattr(self, "regime_features", []),
+            }
+            joblib.dump(regime_data, REGIME_MODEL_PATH)
+            logger.info("Regime model saved to %s", REGIME_MODEL_PATH)
+        if self.ticker_calibration:
+            joblib.dump(self.ticker_calibration, TICKER_CALIBRATION_PATH)
+            logger.info(
+                "Ticker calibration saved (%d entries)", len(self.ticker_calibration),
+            )
         logger.info("Model saved to %s", MODEL_PATH)
 
     def load(self) -> None:
@@ -979,6 +1275,16 @@ class StockReturnPredictor:
             self.ltr_model = xgb.Booster()
             self.ltr_model.load_model(str(LTR_MODEL_PATH))
             logger.info("LTR model loaded from %s", LTR_MODEL_PATH)
+        if REGIME_MODEL_PATH.exists():
+            regime_data = joblib.load(REGIME_MODEL_PATH)
+            self.regime_model = regime_data["model"]
+            self.regime_features = regime_data["features"]
+            logger.info("Regime model loaded from %s", REGIME_MODEL_PATH)
+        if TICKER_CALIBRATION_PATH.exists():
+            self.ticker_calibration = joblib.load(TICKER_CALIBRATION_PATH)
+            logger.info(
+                "Ticker calibration loaded (%d entries)", len(self.ticker_calibration),
+            )
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 
