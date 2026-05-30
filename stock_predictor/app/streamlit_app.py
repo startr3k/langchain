@@ -793,81 +793,152 @@ elif page == "Model Training":
         st.markdown("---")
         st.subheader("Model Evaluation Metrics")
 
-        # Ranking metrics
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            st.metric(
-                "AUC-ROC (Test)",
-                f"{metrics.get('auc_roc', 0):.4f}",
-                help="Area Under ROC Curve on held-out test set (0.5 = random, 1.0 = perfect)",
-            )
-        with m2:
-            st.metric(
-                "Avg Precision (Test)",
-                f"{metrics.get('avg_precision', 0):.4f}",
-                help="Area under the Precision-Recall curve (higher = better at ranking positives)",
-            )
-        with m3:
-            st.metric("Best Model", metrics.get("best_estimator", "N/A"))
-        with m4:
-            st.metric("Training Samples", metrics.get("training_samples", 0))
+        # --- Top-N Precision (primary metrics) ---
+        top_n = metrics.get("top_n", {})
+        top_10 = top_n.get("top_10", {})
+        top_20 = top_n.get("top_20", {})
+        top_50 = top_n.get("top_50", {})
 
-        # Metrics at default threshold (0.5)
-        st.markdown("**At default threshold (0.50):**")
-        d1, d2, d3, d4 = st.columns(4)
-        with d1:
-            st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
-        with d2:
-            st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
-        with d3:
-            st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
-        with d4:
-            st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
-
-        # Metrics at optimal threshold
-        opt_thresh = metrics.get("optimal_threshold", 0.5)
-        st.markdown(f"**At precision-optimized threshold ({opt_thresh:.2f}):**")
-        o1, o2, o3, o4 = st.columns(4)
-        with o1:
-            st.metric("Precision", f"{metrics.get('precision_optimal', 0):.4f}")
-        with o2:
-            st.metric("Recall", f"{metrics.get('recall_optimal', 0):.4f}")
-        with o3:
-            st.metric("F1 Score", f"{metrics.get('f1_optimal', 0):.4f}")
-        with o4:
-            st.metric("Accuracy", f"{metrics.get('accuracy_optimal', 0):.4f}")
-
-        # Two-stage metrics (model + rules)
-        prec_ts = metrics.get("precision_twostage")
-        if prec_ts is not None:
-            n_ts = metrics.get("n_predicted_twostage", 0)
-            st.markdown(
-                f"**Two-stage (model @ {opt_thresh:.2f} + earnings momentum + volume):**"
+        if top_10:
+            st.markdown("#### Top Pick Precision (Test Set)")
+            st.caption(
+                "How many of the model's highest-confidence picks actually "
+                "achieved ≥20% peak return within 3 months."
             )
-            t1, t2, t3, t4 = st.columns(4)
-            with t1:
-                st.metric("Precision", f"{prec_ts:.4f}")
-            with t2:
-                st.metric("Recall", f"{metrics.get('recall_twostage', 0):.4f}")
-            with t3:
-                st.metric("F1 Score", f"{metrics.get('f1_twostage', 0):.4f}")
-            with t4:
-                st.metric("# Predicted Positives", f"{n_ts:,}")
+            p1, p2, p3 = st.columns(3)
+            with p1:
+                hit_rate_10 = top_10.get("hit_rate", 0)
+                hits_10 = top_10.get("hits", 0)
+                st.metric(
+                    "Top-10 Hit Rate",
+                    f"{hits_10}/{top_10.get('total', 10)} ({hit_rate_10:.0%})",
+                    help="Fraction of top 10 predictions that hit ≥20% peak return",
+                )
+            with p2:
+                if top_20:
+                    hit_rate_20 = top_20.get("hit_rate", 0)
+                    hits_20 = top_20.get("hits", 0)
+                    st.metric(
+                        "Top-20 Hit Rate",
+                        f"{hits_20}/{top_20.get('total', 20)} ({hit_rate_20:.0%})",
+                    )
+            with p3:
+                if top_50:
+                    hit_rate_50 = top_50.get("hit_rate", 0)
+                    hits_50 = top_50.get("hits", 0)
+                    st.metric(
+                        "Top-50 Hit Rate",
+                        f"{hits_50}/{top_50.get('total', 50)} ({hit_rate_50:.0%})",
+                    )
 
-        # Overfitting check
-        m5, m6 = st.columns(2)
-        with m5:
-            st.metric(
-                "AUC (Train)",
-                f"{metrics.get('auc_train', 0):.4f}",
-                help="Training AUC — compare with Test AUC to detect overfitting",
-            )
-        with m6:
-            st.metric(
-                "AP (Train)",
-                f"{metrics.get('ap_train', 0):.4f}",
-                help="Training Average Precision — compare with Test AP",
-            )
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                avg_ret_10 = top_10.get("avg_peak_return", 0)
+                st.metric(
+                    "Top-10 Avg Peak Return",
+                    f"{avg_ret_10:.1%}",
+                    help="Average peak return across the top 10 picks",
+                )
+            with r2:
+                if top_20:
+                    st.metric(
+                        "Top-20 Avg Peak Return",
+                        f"{top_20.get('avg_peak_return', 0):.1%}",
+                    )
+            with r3:
+                if top_50:
+                    st.metric(
+                        "Top-50 Avg Peak Return",
+                        f"{top_50.get('avg_peak_return', 0):.1%}",
+                    )
+
+            # Top 10 individual picks table
+            picks = top_10.get("picks", [])
+            if picks:
+                st.markdown("**Top 10 Picks Detail**")
+                picks_df = pd.DataFrame(picks)
+                picks_df = picks_df.rename(columns={
+                    "rank": "Rank",
+                    "ticker": "Ticker",
+                    "probability": "Model Prob",
+                    "actual_return": "Peak Return",
+                    "hit": "Hit (≥20%)",
+                })
+                picks_df["Peak Return"] = picks_df["Peak Return"].apply(
+                    lambda x: f"{x:.1%}" if x is not None else "N/A"
+                )
+                picks_df["Model Prob"] = picks_df["Model Prob"].apply(
+                    lambda x: f"{x:.1%}"
+                )
+                picks_df["Hit (≥20%)"] = picks_df["Hit (≥20%)"].apply(
+                    lambda x: "YES" if x else "NO"
+                )
+                st.dataframe(picks_df, use_container_width=True, hide_index=True)
+
+        # --- Secondary metrics (collapsible) ---
+        with st.expander("Overall Model Metrics"):
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric(
+                    "AUC-ROC (Test)",
+                    f"{metrics.get('auc_roc', 0):.4f}",
+                    help="Area Under ROC Curve on held-out test set",
+                )
+            with m2:
+                st.metric(
+                    "Avg Precision (Test)",
+                    f"{metrics.get('avg_precision', 0):.4f}",
+                    help="Area under the Precision-Recall curve",
+                )
+            with m3:
+                st.metric("Best Model", metrics.get("best_estimator", "N/A"))
+            with m4:
+                st.metric("Training Samples", metrics.get("training_samples", 0))
+
+            opt_thresh = metrics.get("optimal_threshold", 0.5)
+            st.markdown(f"**At precision-optimized threshold ({opt_thresh:.2f}):**")
+            o1, o2, o3, o4 = st.columns(4)
+            with o1:
+                st.metric("Precision", f"{metrics.get('precision_optimal', 0):.4f}")
+            with o2:
+                st.metric("Recall", f"{metrics.get('recall_optimal', 0):.4f}")
+            with o3:
+                st.metric("F1 Score", f"{metrics.get('f1_optimal', 0):.4f}")
+            with o4:
+                st.metric("Accuracy", f"{metrics.get('accuracy_optimal', 0):.4f}")
+
+            # Two-stage metrics
+            prec_ts = metrics.get("precision_twostage")
+            if prec_ts is not None:
+                n_ts = metrics.get("n_predicted_twostage", 0)
+                st.markdown(
+                    f"**Two-stage (model @ {opt_thresh:.2f} + earnings "
+                    f"momentum + volume):**"
+                )
+                t1, t2, t3, t4 = st.columns(4)
+                with t1:
+                    st.metric("Precision", f"{prec_ts:.4f}")
+                with t2:
+                    st.metric("Recall", f"{metrics.get('recall_twostage', 0):.4f}")
+                with t3:
+                    st.metric("F1 Score", f"{metrics.get('f1_twostage', 0):.4f}")
+                with t4:
+                    st.metric("# Predicted Positives", f"{n_ts:,}")
+
+            # Overfitting check
+            m5, m6 = st.columns(2)
+            with m5:
+                st.metric(
+                    "AUC (Train)",
+                    f"{metrics.get('auc_train', 0):.4f}",
+                    help="Compare with Test AUC to detect overfitting",
+                )
+            with m6:
+                st.metric(
+                    "AP (Train)",
+                    f"{metrics.get('ap_train', 0):.4f}",
+                    help="Compare with Test AP",
+                )
 
         with st.expander("Full Training Configuration"):
             st.json(metrics)
