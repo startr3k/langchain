@@ -769,6 +769,22 @@ elif page == "Model Training":
     tickers = NASDAQ_TOP_TICKERS[:num_tickers]
     st.write(f"Training tickers: {', '.join(tickers)}")
 
+    # Walk-forward options
+    st.markdown("---")
+    st.subheader("Training Mode")
+    training_mode = st.radio(
+        "Select training mode:",
+        ["Standard (single split)", "Walk-Forward Cross-Validation"],
+        help="Walk-forward trains on expanding windows for more robust evaluation.",
+    )
+
+    if training_mode == "Walk-Forward Cross-Validation":
+        wf_col1, wf_col2 = st.columns(2)
+        with wf_col1:
+            wf_folds = st.slider("Number of folds", 3, 10, 5)
+        with wf_col2:
+            wf_min_years = st.slider("Minimum training years", 2, 5, 3)
+
     train_col, data_col = st.columns(2)
 
     with train_col:
@@ -781,11 +797,42 @@ elif page == "Model Training":
             progress_bar.progress(10)
 
             try:
-                metrics = predictor.train(
-                    tickers=tickers,
-                    time_budget=time_budget,
-                    include_sentiment=include_sentiment,
-                )
+                if training_mode == "Walk-Forward Cross-Validation":
+                    import os
+                    csv_path = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                        "training_data_10y_full.csv",
+                    )
+                    if os.path.exists(csv_path):
+                        import pandas as _pd
+                        status.info(
+                            f"Loading full training dataset and running "
+                            f"{wf_folds}-fold walk-forward CV..."
+                        )
+                        progress_bar.progress(20)
+                        _df = _pd.read_csv(csv_path)
+                        metrics = predictor.train_walk_forward(
+                            df=_df,
+                            time_budget=time_budget,
+                            n_folds=wf_folds,
+                            min_train_years=wf_min_years,
+                        )
+                    else:
+                        status.warning(
+                            "Full training CSV not found. "
+                            "Falling back to standard training."
+                        )
+                        metrics = predictor.train(
+                            tickers=tickers,
+                            time_budget=time_budget,
+                            include_sentiment=include_sentiment,
+                        )
+                else:
+                    metrics = predictor.train(
+                        tickers=tickers,
+                        time_budget=time_budget,
+                        include_sentiment=include_sentiment,
+                    )
                 progress_bar.progress(100)
                 status.success("Training complete!")
 
@@ -863,7 +910,55 @@ elif page == "Model Training":
     if "training_metrics" in st.session_state:
         metrics = st.session_state["training_metrics"]
         st.markdown("---")
-        st.subheader("Model Evaluation Metrics")
+
+        # --- Walk-Forward Results ---
+        if "folds" in metrics:
+            st.subheader("Walk-Forward Cross-Validation Results")
+            st.info(
+                f"**{metrics.get('n_folds', 0)} folds** | "
+                f"Aggregate Top-10: **{metrics.get('aggregate_top10_hits', 0)}"
+                f"/{metrics.get('aggregate_top10_total', 0)}** "
+                f"({metrics.get('aggregate_top10_hit_rate', 0)*100:.1f}%) | "
+                f"Mean AUC: {metrics.get('mean_auc_test', 0):.4f} ± "
+                f"{metrics.get('std_auc_test', 0):.4f} | "
+                f"Mean AP: {metrics.get('mean_ap_test', 0):.4f} ± "
+                f"{metrics.get('std_ap_test', 0):.4f}"
+            )
+
+            # Per-fold table
+            fold_data = []
+            for f in metrics["folds"]:
+                fold_data.append({
+                    "Fold": f["fold"],
+                    "Test Period": f["test_period"],
+                    "Train Rows": f["train_rows"],
+                    "Test Rows": f["test_rows"],
+                    "AUC (Train)": f["auc_train"],
+                    "AUC (Test)": f["auc_test"],
+                    "AUC Gap": f["auc_gap"],
+                    "AP (Train)": f["ap_train"],
+                    "AP (Test)": f["ap_test"],
+                    "AP Gap": f["ap_gap"],
+                    "Top-10 Hits": f"{f['top10_hits']}/10",
+                    "Hit Rate": f"{f['top10_hit_rate']*100:.0f}%",
+                })
+            import pandas as _pd_wf
+            st.dataframe(
+                _pd_wf.DataFrame(fold_data),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # Per-fold top-10 picks
+            for f in metrics["folds"]:
+                if f.get("top10_picks"):
+                    with st.expander(
+                        f"Fold {f['fold']} Top-10 Picks ({f['test_period']})"
+                    ):
+                        picks_df = _pd_wf.DataFrame(f["top10_picks"])
+                        st.dataframe(picks_df, use_container_width=True, hide_index=True)
+        else:
+            st.subheader("Model Evaluation Metrics")
 
         # --- Architecture summary ---
         ltr = metrics.get("ltr", {})
