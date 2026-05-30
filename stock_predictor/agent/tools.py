@@ -172,8 +172,8 @@ def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> s
 def scan_trending_stocks_tool(top_n: int = 10) -> str:
     """Scan trending NASDAQ stocks and predict which will gain >=20% in 3 months.
 
-    Identifies trending stocks from social media and runs the two-stage
-    classification model (model + rule-based filters) on each to find
+    Identifies trending stocks from social media and runs the ensemble
+    model (classification + LTR ranking) on each to find
     high-probability candidates.
 
     Args:

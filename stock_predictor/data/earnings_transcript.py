@@ -233,7 +233,9 @@ def fetch_earnings_transcript(ticker: str) -> dict:
         ))
 
     # Get Q&A section (latter half)
-    qa_start = text.find("Questions and Answers") or text.find("Question-and-Answer")
+    qa_start = text.find("Questions and Answers")
+    if qa_start == -1:
+        qa_start = text.find("Question-and-Answer")
     if qa_start and qa_start > 0:
         qa_text = text[qa_start:qa_start + 2000]
         source_texts.append((
