@@ -211,7 +211,8 @@ class TestFeatureEngineering:
         from stock_predictor.data.options_flow import OPTIONS_FLOW_FEATURES
         from stock_predictor.data.insider_transactions import INSIDER_FEATURES
         from stock_predictor.data.reddit_sentiment import REDDIT_SENTIMENT_FEATURES
-        expected_total = (
+        from stock_predictor.data.feature_engineering import DROPPED_FEATURES
+        raw_total = (
             len(TECHNICAL_FEATURES)
             + len(HIST_FUNDAMENTAL_FEATURES)
             + len(MACRO_FEATURES)
@@ -223,6 +224,7 @@ class TestFeatureEngineering:
             + len(REDDIT_SENTIMENT_FEATURES)
             + len(DERIVED_FEATURES)
         )
+        expected_total = raw_total - len(DROPPED_FEATURES)
         assert len(ALL_FEATURE_NAMES) == expected_total
 
     def test_target_column_defined(self):
