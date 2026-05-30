@@ -86,7 +86,7 @@ if api_key:
 
 model_choice = st.sidebar.selectbox(
     "OpenAI Model",
-    ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini", "o3", "o3-mini", "o4-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+    ["gpt-5.5", "gpt-5.5-mini", "gpt-5.5-pro", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o", "gpt-4o-mini", "o3", "o3-mini", "o4-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
     index=0,
 )
 
