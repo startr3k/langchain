@@ -451,8 +451,10 @@ class StockReturnPredictor:
         }
 
         # Split sample weights to match train/test
-        sw_train = sample_weight[:split_idx]
-        sw_test = sample_weight[split_idx + gap_rows:len(sample_weight)]
+        # Recompute from the sorted y to ensure alignment
+        sample_weight_sorted = y.map({0: weight_neg, 1: weight_pos}).values
+        sw_train = sample_weight_sorted[:split_idx]
+        sw_test = sample_weight_sorted[split_idx + gap_rows:len(sample_weight_sorted)]
 
         self.automl.fit(
             X_train=X_train,
