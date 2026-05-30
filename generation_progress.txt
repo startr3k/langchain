@@ -1,5 +1,0 @@
-Processed: 2789/3324 tickers
-Rows: 1134061
-Elapsed: 30.9 min
-Rate: 5420 tickers/hr
-ETA: 0.1 hr
