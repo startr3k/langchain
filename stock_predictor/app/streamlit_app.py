@@ -545,6 +545,12 @@ elif page == "AI Stock Advisor":
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
+    # Handle quick prompt (injected by buttons below)
+    if "_quick_prompt" in st.session_state:
+        _pending_prompt = st.session_state.pop("_quick_prompt")
+    else:
+        _pending_prompt = None
+
     # Display chat history
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
@@ -554,6 +560,10 @@ elif page == "AI Stock Advisor":
     user_input = st.chat_input(
         "Ask about stocks (e.g., 'Which NASDAQ stocks have the best 3-month outlook?')"
     )
+
+    # Quick prompt takes priority when no manual input
+    if not user_input and _pending_prompt:
+        user_input = _pending_prompt
 
     if user_input:
         st.session_state.chat_history.append({"role": "user", "content": user_input})
@@ -612,11 +622,7 @@ elif page == "AI Stock Advisor":
             )
             st.rerun()
 
-    # Handle quick prompt
-    if "_quick_prompt" in st.session_state:
-        prompt = st.session_state.pop("_quick_prompt")
-        st.session_state.chat_history.append({"role": "user", "content": prompt})
-        st.rerun()
+
 
 
 # ---------------------------------------------------------------------------
