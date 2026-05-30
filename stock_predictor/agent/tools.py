@@ -5,7 +5,7 @@ Five tools:
 2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz
 3. StockPredictorTool — runs the AutoML model to predict 3-month returns
 4. ScanTrendingStocksTool — scans trending stocks from social media
-5. ScanFullUniverseTool — scans all 617 tickers from the training dataset
+5. ScanFullUniverseTool — scans all 670 tickers from the training dataset
 """
 
 from __future__ import annotations
@@ -223,14 +223,14 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
 
 @tool
 def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.0) -> str:
-    """Scan ALL 617 NASDAQ tickers from the training dataset and rank by predicted returns.
+    """Scan ALL 670 tickers (NASDAQ + NYSE tech) from the training dataset and rank by predicted returns.
 
     Uses the cached training data to batch-score every ticker in ~5 seconds,
     then filters by market cap and returns the top-N ranked picks. This is
     the same logic as the daily picks pipeline.
 
     Use this tool when the user wants comprehensive "best picks" across the
-    entire NASDAQ universe — not just trending stocks.
+    entire stock universe — not just trending stocks.
 
     Args:
         top_n: Number of top picks to return (default 10).
@@ -305,7 +305,7 @@ def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.
             "total_tickers_scored": len(scored),
             "top_picks": results,
             "min_market_cap_filter": f"${min_market_cap_billions}B",
-            "source": "Full 617-ticker training universe",
+            "source": "Full 670-ticker training universe (NASDAQ + NYSE tech)",
         },
         indent=2,
         default=str,
