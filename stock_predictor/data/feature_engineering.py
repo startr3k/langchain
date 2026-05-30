@@ -140,24 +140,38 @@ SENTIMENT_FEATURES = [
     "finviz_mention_count", "finviz_mean_polarity",
 ]
 
+# Features removed based on multicollinearity / grouped permutation
+# importance analysis.  These either hurt generalisation (negative
+# permutation importance) or are perfectly redundant (r = 1.0).
+DROPPED_FEATURES = {
+    "treasury_10y",                   # negative perm importance (overfits to rate regime)
+    "hist_current_ratio",             # negative perm importance
+    "hist_revenue_growth_qoq",        # negative perm importance
+    "gold_return_20d",                # negative perm importance
+    "insider_total_transactions_90d", # r=1.0 with insider_net_buys_90d
+}
+
 # All features used by the model (training + prediction).
 # Only time-aligned features are included — no current-snapshot
 # fundamentals or sentiment (data leakage).
 # Google Trends features are excluded from the default list because
 # Google aggressively rate-limits cloud/datacenter IPs; they are
 # added dynamically when data is actually available.
-ALL_FEATURE_NAMES = (
-    TECHNICAL_FEATURES
-    + HIST_FUNDAMENTAL_FEATURES
-    + MACRO_FEATURES
-    + EARNINGS_FEATURES
-    + SEC_FEATURES
-    + SHORT_INTEREST_FEATURES
-    + OPTIONS_FLOW_FEATURES
-    + INSIDER_FEATURES
-    + REDDIT_SENTIMENT_FEATURES
-    + DERIVED_FEATURES
-)
+ALL_FEATURE_NAMES = [
+    f for f in (
+        TECHNICAL_FEATURES
+        + HIST_FUNDAMENTAL_FEATURES
+        + MACRO_FEATURES
+        + EARNINGS_FEATURES
+        + SEC_FEATURES
+        + SHORT_INTEREST_FEATURES
+        + OPTIONS_FLOW_FEATURES
+        + INSIDER_FEATURES
+        + REDDIT_SENTIMENT_FEATURES
+        + DERIVED_FEATURES
+    )
+    if f not in DROPPED_FEATURES
+]
 
 TARGET_COLUMN = "Forward_Max_Return_3M"
 

@@ -887,28 +887,58 @@ elif page == "Model Training":
             pass
 
     if show_importance and predictor_for_importance is not None:
-        importance = predictor_for_importance.get_feature_importance(top_n=30)
-        if importance:
+        grouped = predictor_for_importance.get_grouped_feature_importance(top_n=25)
+        if grouped:
             st.markdown("---")
-            st.subheader("Feature Importances")
+            st.subheader("Feature Importances (Grouped by Correlation)")
+            st.caption(
+                "Correlated features (Spearman |r| > 0.70) are summed into "
+                "concept-level groups so importance isn't diluted across "
+                "redundant features. Groups are labeled in **bold**."
+            )
             import plotly.express as px
 
-            imp_df = pd.DataFrame(importance, columns=["Feature", "Importance"])
+            labels = []
+            values = []
+            colors = []
+            for name, imp, members in grouped:
+                if len(members) > 1:
+                    label = f"⬛ {name} ({len(members)} features)"
+                else:
+                    label = name
+                labels.append(label)
+                values.append(imp)
+                colors.append("group" if len(members) > 1 else "single")
+
+            imp_df = pd.DataFrame({
+                "Concept": labels,
+                "Importance": values,
+                "Type": colors,
+            })
             imp_df = imp_df.sort_values("Importance", ascending=True)
             fig = px.bar(
-                imp_df, x="Importance", y="Feature",
+                imp_df, x="Importance", y="Concept",
                 orientation="h",
-                title="Top Feature Importances (Higher = More Predictive)",
-                color="Importance",
-                color_continuous_scale="Viridis",
+                title="Grouped Feature Importances (Higher = More Predictive)",
+                color="Type",
+                color_discrete_map={"group": "#636EFA", "single": "#00CC96"},
             )
             fig.update_layout(
-                height=max(400, len(importance) * 22),
+                height=max(400, len(grouped) * 28),
                 yaxis_title="",
-                xaxis_title="Importance Score",
-                coloraxis_showscale=False,
+                xaxis_title="Importance Score (sum of split-based importances)",
+                showlegend=True,
+                legend_title_text="",
             )
             st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("Group Details"):
+                for name, imp, members in grouped:
+                    if len(members) > 1:
+                        st.markdown(f"**{name}** (importance: {imp})")
+                        st.markdown("  " + ", ".join(f"`{m}`" for m in members))
+                    else:
+                        st.markdown(f"`{name}` (importance: {imp})")
 
     # ---- Gain Chart ----
     if "training_metrics" in st.session_state:

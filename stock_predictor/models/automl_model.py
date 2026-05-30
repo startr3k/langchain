@@ -107,6 +107,42 @@ def _log_transform(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Correlated feature groups identified by multicollinearity analysis
+# (Spearman |r| > 0.70, union-find grouping).  Used for grouped
+# feature importance which avoids the split-dilution problem that
+# makes tree-based importances misleading for correlated features.
+FEATURE_GROUPS: dict[str, list[str]] = {
+    "Price Momentum & Trend": [
+        "Return_5d", "Return_20d", "Return_60d",
+        "Price_to_SMA_20", "Price_to_SMA_50", "Price_to_SMA_200",
+        "Momentum_Accel", "Volume_Price_Confirm",
+        "Dist_52w_High", "Dist_52w_Low",
+        "RSI_14", "MACD", "MACD_Hist", "BB_Position",
+    ],
+    "Volatility": [
+        "Volatility_20d", "Volatility_60d", "BB_Width",
+    ],
+    "Volume Activity": [
+        "Volume_Ratio", "Volume_Surge_3d", "Volume_Spike_Magnitude",
+    ],
+    "Profitability & Fundamentals": [
+        "hist_operating_income", "hist_net_income", "hist_diluted_eps",
+        "hist_operating_margin", "hist_profit_margin",
+        "hist_roe", "hist_roa", "sec_operating_cash_flow",
+    ],
+    "Company Size": [
+        "hist_total_assets", "hist_stockholders_equity",
+    ],
+    "Interest Rates": [
+        "treasury_3m", "yield_curve_spread",
+    ],
+    "Insider Activity": [
+        "insider_net_buys_90d", "insider_total_transactions_90d",
+    ],
+
+}
+
+
 def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute interaction / derived features from existing columns.
 
@@ -613,7 +649,6 @@ class StockReturnPredictor:
         else:
             df = df.fillna(0.0)
 
-
         proba = self.automl.predict_proba(df)
         if proba.ndim == 2:
             return float(proba[0, 1])
@@ -827,3 +862,40 @@ class StockReturnPredictor:
             pairs.sort(key=lambda x: x[1], reverse=True)
             return pairs[:top_n]
         return []
+
+    def get_grouped_feature_importance(
+        self, top_n: int = 20,
+    ) -> list[tuple[str, float, list[str]]]:
+        """Return feature importances aggregated by correlated groups.
+
+        Correlated features (|r| > 0.70) are summed into concept-level
+        groups so the importance is not diluted across redundant
+        features.  Singleton features (not correlated with any other)
+        are reported individually.
+
+        Returns:
+            List of (group_name, summed_importance, member_features)
+            sorted descending by importance.
+        """
+        raw = self.get_feature_importance(top_n=999)
+        if not raw:
+            return []
+
+        imp_map = dict(raw)
+        grouped_in = set()
+        results: list[tuple[str, float, list[str]]] = []
+
+        for group_name, members in FEATURE_GROUPS.items():
+            present = [m for m in members if m in imp_map]
+            if not present:
+                continue
+            total_imp = sum(imp_map[m] for m in present)
+            results.append((group_name, total_imp, present))
+            grouped_in.update(present)
+
+        for feat, imp in raw:
+            if feat not in grouped_in:
+                results.append((feat, imp, [feat]))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:top_n]
