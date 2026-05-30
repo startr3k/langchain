@@ -29,6 +29,13 @@ from stock_predictor.data.sentiment import (
 )
 from stock_predictor.data.yfinance_client import get_stock_data, get_stock_info, NASDAQ_TOP_TICKERS
 from stock_predictor.models.automl_model import StockReturnPredictor
+from stock_predictor.pipeline.daily_picks import (
+    run_daily_picks,
+    evaluate_ground_truth,
+    get_precision_over_time,
+    DEFAULT_CSV_PATH,
+)
+from stock_predictor.pipeline.social_listener import get_social_hottest, get_eligible_tickers
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -74,8 +81,11 @@ page = st.sidebar.radio(
         "AI Stock Advisor",
         "Stock Analysis",
         "Social Sentiment",
+        "Social Media Listener",
         "Model Training",
         "Batch Predictions",
+        "Daily Picks Pipeline",
+        "Daily Picks History",
     ],
 )
 
@@ -1293,6 +1303,251 @@ elif page == "Batch Predictions":
 
         except FileNotFoundError:
             st.error("Model not trained yet. Go to 'Model Training' first.")
+
+# ---------------------------------------------------------------------------
+# Page: Social Media Listener
+# ---------------------------------------------------------------------------
+elif page == "Social Media Listener":
+    st.title("🔥 Social Media Listener")
+    st.markdown(
+        "Top 20 hottest stocks on social media — filtered to **Dow, S&P 500, "
+        "and NASDAQ** listed stocks with **≥ $1B market cap** only.  "
+        "Data sourced from Reddit finance subreddits and StockTwits."
+    )
+
+    with st.expander("Eligible Ticker Universe"):
+        eligible = get_eligible_tickers()
+        st.write(f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 with ≥$1B market cap")
+        st.caption(", ".join(sorted(eligible)[:50]) + f"... ({len(eligible)} total)")
+
+    if st.button("🔄 Refresh Social Media Data", type="primary"):
+        with st.spinner("Scanning Reddit & StockTwits for trending stocks..."):
+            hottest = get_social_hottest(top_n=20)
+
+        if hottest:
+            st.success(f"Found {len(hottest)} trending stocks on major exchanges")
+
+            rows = []
+            for rank, item in enumerate(hottest, 1):
+                sent = item["avg_sentiment"]
+                if sent > 0.1:
+                    sent_icon = "🟢"
+                elif sent < -0.1:
+                    sent_icon = "🔴"
+                else:
+                    sent_icon = "⚪"
+
+                rows.append({
+                    "Rank": rank,
+                    "Ticker": item["ticker"],
+                    "Mentions": item["mentions"],
+                    "Sentiment": f"{sent_icon} {item['sentiment_label']} ({sent:+.3f})",
+                    "Upvotes": item["total_upvotes"],
+                    "Comments": item["total_comments"],
+                    "Engagement": item["engagement_score"],
+                    "Sources": item["sources"],
+                })
+
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # Sentiment distribution
+            st.subheader("Sentiment Distribution")
+            sentiments = [h["avg_sentiment"] for h in hottest]
+            labels = [h["ticker"] for h in hottest]
+            chart_df = pd.DataFrame({"Ticker": labels, "Sentiment": sentiments})
+            st.bar_chart(chart_df.set_index("Ticker"))
+
+            st.caption(f"Last updated: {hottest[0].get('last_updated', 'N/A')}")
+        else:
+            st.info("No trending tickers found on major exchanges at the moment.")
+
+
+# ---------------------------------------------------------------------------
+# Page: Daily Picks Pipeline
+# ---------------------------------------------------------------------------
+elif page == "Daily Picks Pipeline":
+    st.title("📋 Daily Picks Pipeline (MLOps)")
+    st.markdown(
+        "Run the daily pipeline to record top-10 stock picks with model "
+        "predictions, SHAP explanations, and sentiment scores.  Use the "
+        "ground-truth evaluator to check whether past picks achieved ≥20% "
+        "upside."
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Generate Daily Picks")
+        top_k_pipe = st.selectbox("Top picks to record", [5, 10, 20], index=1, key="pipe_topk")
+        min_mcap = st.selectbox(
+            "Min market cap",
+            [("$100M", 100_000_000), ("$500M", 500_000_000), ("$1B", 1_000_000_000)],
+            format_func=lambda x: x[0],
+            index=0,
+            key="pipe_mcap",
+        )
+
+        if st.button("▶️ Run Daily Pipeline", type="primary"):
+            with st.spinner("Running daily picks pipeline... This may take a few minutes."):
+                try:
+                    df_picks = run_daily_picks(top_k=top_k_pipe, min_market_cap=min_mcap[1])
+                    if df_picks.empty:
+                        st.warning("No picks generated (may already exist for today).")
+                    else:
+                        st.success(f"Recorded {len(df_picks)} picks!")
+                        st.dataframe(df_picks, use_container_width=True)
+                except Exception as e:
+                    st.error(f"Pipeline error: {e}")
+
+    with col2:
+        st.subheader("Evaluate Ground Truth")
+        st.markdown(
+            "Check all historical picks for ≥20% upside from the recorded "
+            "closing price to date.  Updates existing records only if the "
+            "new upside is higher."
+        )
+        if st.button("🔍 Evaluate Ground Truth"):
+            with st.spinner("Checking price history for all recorded picks..."):
+                try:
+                    df_gt = evaluate_ground_truth()
+                    if df_gt.empty:
+                        st.info("No picks recorded yet.")
+                    else:
+                        evaluated = df_gt[df_gt["hit_20pct"].notna()]
+                        if evaluated.empty:
+                            st.info("No picks old enough to evaluate yet.")
+                        else:
+                            hits = int(evaluated["hit_20pct"].sum())
+                            total = len(evaluated)
+                            prec = hits / total if total > 0 else 0
+                            st.metric("Overall Precision", f"{prec:.1%}", f"{hits}/{total} hits")
+                            st.dataframe(evaluated[["date", "ticker", "probability", "close_price",
+                                                     "max_upside_pct", "hit_20pct"]],
+                                         use_container_width=True)
+                except Exception as e:
+                    st.error(f"Evaluation error: {e}")
+
+    # Show precision over time if data exists
+    st.markdown("---")
+    st.subheader("Precision Over Time")
+    prec_df = get_precision_over_time()
+    if not prec_df.empty:
+        st.line_chart(prec_df.set_index("date")["precision"])
+
+        col_a, col_b, col_c = st.columns(3)
+        overall_prec = prec_df["hits"].sum() / prec_df["total_picks"].sum() if prec_df["total_picks"].sum() > 0 else 0
+        col_a.metric("Overall Precision", f"{overall_prec:.1%}")
+        col_b.metric("Total Picks", int(prec_df["total_picks"].sum()))
+        col_c.metric("Days Tracked", len(prec_df))
+    else:
+        st.info("No evaluated picks yet. Run the pipeline and evaluate ground truth to see precision over time.")
+
+    # Show raw CSV
+    if DEFAULT_CSV_PATH.exists():
+        with st.expander("Raw CSV Data"):
+            raw = pd.read_csv(DEFAULT_CSV_PATH)
+            st.dataframe(raw, use_container_width=True)
+            st.download_button(
+                "Download CSV",
+                data=raw.to_csv(index=False),
+                file_name="daily_picks.csv",
+                mime="text/csv",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Page: Daily Picks History
+# ---------------------------------------------------------------------------
+elif page == "Daily Picks History":
+    st.title("📊 Daily Picks History")
+    st.markdown(
+        "Browse historical daily stock picks with all supporting information "
+        "including model probability, SHAP explanations, sentiment, and "
+        "ground-truth performance."
+    )
+
+    if not DEFAULT_CSV_PATH.exists():
+        st.info("No picks recorded yet. Go to 'Daily Picks Pipeline' to start recording picks.")
+    else:
+        df_all = pd.read_csv(DEFAULT_CSV_PATH)
+        if df_all.empty:
+            st.info("No picks recorded yet.")
+        else:
+            available_dates = sorted(df_all["date"].unique(), reverse=True)
+
+            # Date filter
+            selected_date = st.selectbox("Select Date", available_dates, index=0)
+
+            df_day = df_all[df_all["date"] == selected_date].copy()
+
+            if df_day.empty:
+                st.warning(f"No picks for {selected_date}")
+            else:
+                st.subheader(f"Top {len(df_day)} Picks — {selected_date}")
+
+                # Summary metrics
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Picks", len(df_day))
+                avg_prob = df_day["probability"].mean()
+                col2.metric("Avg Probability", f"{avg_prob:.1%}")
+
+                if "hit_20pct" in df_day.columns and df_day["hit_20pct"].notna().any():
+                    hits = int(df_day["hit_20pct"].sum())
+                    total_eval = int(df_day["hit_20pct"].notna().sum())
+                    prec = hits / total_eval if total_eval > 0 else 0
+                    col3.metric("Precision", f"{prec:.0%}", f"{hits}/{total_eval}")
+                else:
+                    col3.metric("Precision", "Pending")
+
+                avg_sent = df_day["sentiment_score"].mean() if "sentiment_score" in df_day.columns else 0
+                sent_label = "Bullish" if avg_sent > 0.05 else ("Bearish" if avg_sent < -0.05 else "Neutral")
+                col4.metric("Avg Sentiment", f"{avg_sent:+.3f} ({sent_label})")
+
+                # Picks table
+                display_cols = ["rank", "ticker", "probability", "signal", "close_price",
+                                "volume_surge_3d", "sentiment_score", "sentiment_mentions",
+                                "regime_confidence", "ticker_calibration"]
+                if "max_upside_pct" in df_day.columns:
+                    display_cols.extend(["max_upside_pct", "hit_20pct"])
+
+                available_cols = [c for c in display_cols if c in df_day.columns]
+                st.dataframe(
+                    df_day[available_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                # SHAP explanations
+                if "shap_top_features" in df_day.columns:
+                    st.subheader("Prediction Explanations (SHAP)")
+                    for _, row in df_day.iterrows():
+                        shap_str = row.get("shap_top_features", "")
+                        if shap_str:
+                            st.markdown(f"**{row['ticker']}** (P={row['probability']:.1%}): `{shap_str}`")
+
+                # Sector breakdown
+                if "sector" in df_day.columns:
+                    with st.expander("Sector Breakdown"):
+                        sector_counts = df_day["sector"].value_counts()
+                        st.bar_chart(sector_counts)
+
+            # Overall precision chart across all dates
+            st.markdown("---")
+            st.subheader("Precision Over Time (All Dates)")
+            prec_df = get_precision_over_time()
+            if not prec_df.empty:
+                st.line_chart(prec_df.set_index("date")["precision"])
+            else:
+                st.info("No ground-truth evaluations available yet.")
+
+            # Date range filter for browsing
+            with st.expander("Browse All Picks"):
+                st.dataframe(df_all, use_container_width=True, hide_index=True)
+
 
 # ---------------------------------------------------------------------------
 # Footer

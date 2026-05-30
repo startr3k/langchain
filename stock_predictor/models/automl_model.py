@@ -214,12 +214,12 @@ TICKER_CALIBRATION_PATH = MODEL_DIR / "ticker_calibration.pkl"
 
 # Ensemble weight for combining classification and LTR scores.
 # 0.0 = pure classification, 1.0 = pure LTR.
-LTR_ENSEMBLE_WEIGHT = 0.5
+LTR_ENSEMBLE_WEIGHT = 0.6
 
 # Volatility-aware scoring: multiply ranking score by
 # (1 + VOLATILITY_SCORE_ALPHA * percentile_rank_of_volatility).
 # Higher-volatility stocks are more likely to achieve >=20% breakouts.
-VOLATILITY_SCORE_ALPHA = 0.3
+VOLATILITY_SCORE_ALPHA = 0.25
 
 # Default number of top picks to highlight.
 DEFAULT_TOP_K = 5
