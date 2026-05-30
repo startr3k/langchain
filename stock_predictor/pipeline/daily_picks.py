@@ -344,27 +344,61 @@ def _batch_score_from_cache(
     eligible = scored[scored["in_eligible_universe"]].copy()
     logger.info("%d tickers pass cached eligible filter", len(eligible))
 
-    # For the selected top-K, fetch actual market cap from yfinance
-    # (only ~10 calls instead of 617)
-    scored["market_cap"] = 0.0  # placeholder
-
     # Take top_k from the filtered list
     top_candidates = eligible.head(top_k)
+    candidate_tickers = top_candidates["ticker"].tolist()
 
-    # Fetch full info (close price, sector, market cap) only for the selected picks
+    # ── Batch-fetch close prices via yf.download (single request) ────
+    close_prices: dict[str, float | None] = {}
+    try:
+        price_df = yf.download(
+            candidate_tickers,
+            period="5d",
+            progress=False,
+            threads=True,
+        )
+        if not price_df.empty:
+            if isinstance(price_df.columns, pd.MultiIndex):
+                # Multi-ticker download returns MultiIndex columns
+                for t in candidate_tickers:
+                    try:
+                        closes = price_df[("Close", t)].dropna()
+                        close_prices[t] = round(float(closes.iloc[-1]), 2) if not closes.empty else None
+                    except (KeyError, IndexError):
+                        close_prices[t] = None
+            else:
+                # Single ticker download returns flat columns
+                closes = price_df["Close"].dropna()
+                if not closes.empty and len(candidate_tickers) == 1:
+                    close_prices[candidate_tickers[0]] = round(float(closes.iloc[-1]), 2)
+        logger.info("Batch-fetched close prices for %d tickers", len(close_prices))
+    except Exception as e:
+        logger.warning("Batch price download failed: %s", e)
+
+    # ── Fetch sector + market cap per ticker (with retry + delay) ────
+    import time
+
+    sector_cache: dict[str, str] = {}
+    mcap_cache: dict[str, int] = {}
+
+    for t in candidate_tickers:
+        for attempt in range(3):
+            try:
+                info = yf.Ticker(t).info
+                sector_cache[t] = info.get("sector", "N/A")
+                mcap_cache[t] = info.get("marketCap", 0) or 0
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+                else:
+                    sector_cache[t] = "N/A"
+                    mcap_cache[t] = 0
+
+    # ── Build final picks list ───────────────────────────────────────
     top_picks: list[dict] = []
     for _, row in top_candidates.iterrows():
         ticker = row["ticker"]
-
-        try:
-            full_info = yf.Ticker(ticker).info
-            close_price = full_info.get("previousClose") or full_info.get("regularMarketPreviousClose")
-            sector = full_info.get("sector", "N/A")
-            mcap = full_info.get("marketCap", 0) or 0
-        except Exception:
-            close_price = None
-            sector = "N/A"
-            mcap = 0
 
         regime_conf = predictor.predict_regime_confidence(
             {col: row.get(col, 0.0) for col in predictor.feature_names}
@@ -372,8 +406,11 @@ def _batch_score_from_cache(
         )
         cal_factor = predictor.ticker_calibration.get(ticker, 1.0)
 
-        # Build a feature dict from the cached row for SHAP explanations
         feature_row = {col: row.get(col, 0.0) for col in predictor.feature_names if col in row.index}
+
+        close_price = close_prices.get(ticker)
+        sector = sector_cache.get(ticker, "N/A")
+        mcap = mcap_cache.get(ticker, 0)
 
         top_picks.append({
             "ticker": ticker,
@@ -391,7 +428,9 @@ def _batch_score_from_cache(
             "last_close": close_price,
             "_feature_row": feature_row,
         })
-        logger.info("Pick %d: %s (score=%.4f, mcap=$%.1fB)", len(top_picks), ticker, row["ensemble_score"], mcap / 1e9)
+        logger.info("Pick %d: %s (score=%.4f, close=$%s, sector=%s, mcap=$%.1fB)",
+                     len(top_picks), ticker, row["ensemble_score"],
+                     close_price, sector, mcap / 1e9)
 
     logger.info("Batch scoring complete: %d picks selected from %d tickers", len(top_picks), len(all_tickers))
     return top_picks
