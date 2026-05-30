@@ -113,12 +113,74 @@ page = st.sidebar.radio(
 if page == "Top Recommendations":
     st.title("Top Stock Recommendations")
     st.markdown(
-        "Combines **model probability** (P(≥20% peak gain in 3 months)) with "
-        "**live sentiment** from Reddit, Finviz, and StockTwits to produce a "
-        "composite score ranking."
+        "Shows the **top daily stock picks** from the full eligible universe "
+        "(Dow + S&P 500 + NASDAQ, ≥$1B market cap).  Loads instantly from the "
+        "daily picks pipeline if it has already run today.  "
+        "🔥 = also trending on social media."
     )
 
-    col_cfg1, col_cfg2, col_cfg3 = st.columns(3)
+    # ── Helper: load today's picks from the daily_picks CSV ──────────
+    def _load_todays_picks() -> pd.DataFrame | None:
+        """Return today's picks from the CSV, or None if not available."""
+        from datetime import date as _date
+
+        csv_path = Path(DEFAULT_CSV_PATH)
+        if not csv_path.exists():
+            return None
+        try:
+            df = pd.read_csv(csv_path)
+            today_str = _date.today().isoformat()
+            today_df = df[df["date"] == today_str]
+            if today_df.empty:
+                return None
+            return today_df
+        except Exception:
+            return None
+
+    # ── Helper: convert CSV rows → display-friendly dicts ────────────
+    def _csv_rows_to_results(df: pd.DataFrame, top_x: int) -> list[dict]:
+        """Convert daily_picks CSV rows to the display format."""
+        rows = df.head(top_x)
+        results = []
+        for _, row in rows.iterrows():
+            prob = float(row.get("probability", row.get("ensemble_score", 0)))
+            sent_score = float(row.get("sentiment_score", 0))
+            # Sentiment score in CSV is raw polarity; normalize to [0,1]
+            sentiment_normalized = (sent_score + 1.0) / 2.0 if abs(sent_score) <= 1 else sent_score
+            vol_surge = row.get("volume_surge_3d")
+            vol_surge_str = f"{vol_surge:.2f}x" if pd.notna(vol_surge) and vol_surge else "N/A"
+
+            shap_str = row.get("shap_top_features", "")
+
+            results.append({
+                "Ticker": row["ticker"],
+                "Model P(≥20%)": round(prob, 4),
+                "Sentiment Score": round(sentiment_normalized, 4),
+                "Composite Score": round(prob, 4),  # pipeline already ranked by ensemble
+                "Signal": row.get("signal", "BUY"),
+                "Vol Surge 3d": vol_surge_str,
+                "Regime Confidence": float(row.get("regime_confidence", 0.5)),
+                "Ticker Calibration": float(row.get("ticker_calibration", 1.0)),
+                "Sentiment Polarity": round(sent_score, 3),
+                "Total Mentions": int(row.get("sentiment_mentions", 0)),
+                "Market Cap": row.get("market_cap"),
+                "Sector": row.get("sector", "N/A"),
+                "Close Price": row.get("close_price"),
+                "SHAP Explanation": shap_str if pd.notna(shap_str) else "",
+                "_explanation_str": shap_str if pd.notna(shap_str) else "",
+            })
+        return results
+
+    # ── Check for existing pipeline picks ────────────────────────────
+    today_picks = _load_todays_picks()
+
+    if today_picks is not None:
+        st.success(
+            f"Loaded **{len(today_picks)} picks** from today's pipeline run. "
+            "Data shown instantly from cached results."
+        )
+
+    col_cfg1, col_cfg2 = st.columns([1, 2])
     with col_cfg1:
         top_x = st.number_input(
             "Show top X results",
@@ -128,280 +190,176 @@ if page == "Top Recommendations":
             step=1,
         )
     with col_cfg2:
-        sentiment_weight = st.slider(
-            "Sentiment weight",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.3,
-            step=0.05,
-            help="Weight for sentiment in composite score. "
-                 "Model probability weight = 1 - sentiment weight.",
-        )
-    with col_cfg3:
-        ticker_source = st.selectbox(
-            "Ticker universe",
-            ["NASDAQ Top 50", "NASDAQ Top 100", "Custom list"],
-        )
+        if today_picks is not None:
+            st.caption("Pipeline results loaded. Click Regenerate to re-run.")
 
-    if ticker_source == "Custom list":
-        custom_tickers = st.text_area(
-            "Enter tickers (comma-separated)",
-            value=", ".join(NASDAQ_TOP_TICKERS[:20]),
-        )
-        scan_tickers = [t.strip().upper() for t in custom_tickers.split(",") if t.strip()]
-    elif ticker_source == "NASDAQ Top 100":
-        scan_tickers = NASDAQ_TOP_TICKERS[:100]
-    else:
-        scan_tickers = NASDAQ_TOP_TICKERS[:50]
+    # ── Display picks (from CSV or after regeneration) ───────────────
+    regenerate = st.button("🔄 Regenerate Recommendations", type="primary")
 
-    model_weight = 1.0 - sentiment_weight
+    results: list[dict] = []
+    from_pipeline = False
 
-    if st.button("Generate Recommendations", type="primary"):
-        try:
-            predictor = StockReturnPredictor()
-            predictor.load()
-        except FileNotFoundError:
-            st.error("Model not trained yet. Go to 'Model Training' first.")
-            st.stop()
+    if regenerate:
+        # Delete today's stale entries and re-run the pipeline
+        from datetime import date as _date
 
-        results = []
-        progress_bar = st.progress(0, text="Running predictions...")
-        status_text = st.empty()
-
-        for i, ticker in enumerate(scan_tickers):
-            progress_bar.progress(
-                (i + 1) / len(scan_tickers),
-                text=f"Processing {ticker} ({i+1}/{len(scan_tickers)})...",
-            )
-
-            # Model prediction (with SHAP explanation for display)
-            pred = predictor.predict_ticker(ticker, include_explanation=True)
-            prob = pred.get("probability_gain")
-            if prob is None:
-                continue
-
-            # Live sentiment
-            status_text.text(f"Fetching sentiment for {ticker}...")
+        csv_path = Path(DEFAULT_CSV_PATH)
+        if csv_path.exists():
             try:
-                sent_feats = get_sentiment_features(ticker)
+                existing = pd.read_csv(csv_path)
+                today_str = _date.today().isoformat()
+                cleaned = existing[existing["date"] != today_str]
+                cleaned.to_csv(csv_path, index=False)
             except Exception:
-                sent_feats = {}
+                pass
 
-            mean_polarity = sent_feats.get("sentiment_mean_polarity", 0.0)
-            total_mentions = sent_feats.get("sentiment_total_mentions", 0)
-            reddit_count = sent_feats.get("reddit_mention_count", 0)
-            stocktwits_bull = sent_feats.get("stocktwits_bullish_count", 0)
-            stocktwits_bear = sent_feats.get("stocktwits_bearish_count", 0)
-            bull_bear_ratio = sent_feats.get("stocktwits_bull_bear_ratio", 1.0)
-            transcript_sent = sent_feats.get("transcript_sentiment")
-            transcript_url = sent_feats.get("transcript_url")
+        with st.spinner(
+            "Re-running daily picks pipeline on full eligible universe "
+            "(Dow + S&P 500 + NASDAQ, ≥$1B)..."
+        ):
+            try:
+                new_picks = run_daily_picks(
+                    top_k=max(top_x, 10),
+                    min_market_cap=1_000_000_000,
+                )
+                if new_picks is not None and not new_picks.empty:
+                    today_picks = new_picks
+                    from_pipeline = True
+                    st.success(f"Regenerated {len(today_picks)} picks!")
+                else:
+                    st.warning("Pipeline returned 0 picks.")
+            except Exception as e:
+                st.error(f"Pipeline error: {e}")
 
-            # Normalize sentiment polarity from [-1, 1] to [0, 1]
-            sentiment_score = (mean_polarity + 1.0) / 2.0
+    if today_picks is not None and not results:
+        results = _csv_rows_to_results(today_picks, top_x)
+    elif not results:
+        st.info(
+            "No picks available for today. Click **Regenerate Recommendations** "
+            "to run the pipeline, or schedule it via the Daily Picks Pipeline page."
+        )
+        st.stop()
 
-            # Composite score: weighted combination
-            composite = model_weight * prob + sentiment_weight * sentiment_score
+    if not results:
+        st.warning("No results available.")
+        st.stop()
 
-            vol_surge = pred.get("volume_surge_3d")
-            vol_surge_str = f"{vol_surge:.2f}x" if vol_surge is not None else "N/A"
+    top_results = results[:top_x]
 
-            regime_conf = pred.get("regime_confidence", 0.5)
-            ticker_cal = pred.get("ticker_calibration", 1.0)
+    # Load social buzz data for 🔥 indicator
+    hot_tickers = get_hot_tickers()
+    buzz_data = get_social_buzz_data()
 
-            results.append({
-                "Ticker": ticker,
-                "Model P(≥20%)": round(prob, 4),
-                "Sentiment Score": round(sentiment_score, 4),
-                "Composite Score": round(composite, 4),
-                "Signal": pred.get("signal", "HOLD"),
-                "Vol Surge 3d": vol_surge_str,
-                "Regime Confidence": regime_conf,
-                "Ticker Calibration": ticker_cal,
-                "Sentiment Polarity": round(mean_polarity, 3),
-                "Total Mentions": total_mentions,
-                "Reddit Mentions": reddit_count,
-                "StockTwits Bull/Bear": f"{stocktwits_bull}/{stocktwits_bear}",
-                "Transcript Sentiment": f"{transcript_sent:+.3f}" if transcript_sent is not None else "N/A",
-                "_source_texts": sent_feats.get("source_texts", []),
-                "_transcript_url": transcript_url,
-                "_explanation": pred.get("explanation", []),
-            })
-
-        progress_bar.empty()
-        status_text.empty()
-
-        if not results:
-            st.warning("No results — model could not generate predictions.")
-            st.stop()
-
-        # Sort by composite score and take top X
-        results.sort(key=lambda x: x["Composite Score"], reverse=True)
-        top_results = results[:top_x]
-
-        # Load social buzz data for 🔥 indicator
-        hot_tickers = get_hot_tickers()
-        buzz_data = get_social_buzz_data()
-
-        st.subheader(f"Top {len(top_results)} Recommendations")
-        if hot_tickers:
-            st.caption(
-                f"Score = {model_weight:.0%} × Model Probability + "
-                f"{sentiment_weight:.0%} × Sentiment Score  ·  "
-                f"🔥 = trending on social media ({len(hot_tickers)} hot stocks)"
-            )
-        else:
-            st.caption(
-                f"Score = {model_weight:.0%} × Model Probability + "
-                f"{sentiment_weight:.0%} × Sentiment Score  ·  "
-                "Run Social Media Listener first to see 🔥 indicators"
-            )
-
-        display_top = []
-        for r in top_results:
-            row = {k: v for k, v in r.items() if not k.startswith("_")}
-            ticker = r["Ticker"]
-            if ticker in hot_tickers:
-                row["Ticker"] = f"🔥 {ticker}"
-                buzz = buzz_data.get(ticker, {})
-                row["Social Buzz"] = buzz.get("sentiment_label", "Hot")
-            else:
-                row["Social Buzz"] = "—"
-            display_top.append(row)
-
-        df = pd.DataFrame(display_top)
-        # Reorder columns to put Social Buzz after Ticker
-        cols = df.columns.tolist()
-        if "Social Buzz" in cols:
-            cols.remove("Social Buzz")
-            ticker_idx = cols.index("Ticker") + 1
-            cols.insert(ticker_idx, "Social Buzz")
-            df = df[cols]
-
-        st.dataframe(
-            df.style.format({
-                "Model P(≥20%)": "{:.1%}",
-                "Sentiment Score": "{:.1%}",
-                "Composite Score": "{:.1%}",
-                "Sentiment Polarity": "{:+.3f}",
-            }),
-            use_container_width=True,
-            hide_index=True,
+    st.subheader(f"Top {len(top_results)} Recommendations")
+    if hot_tickers:
+        st.caption(
+            f"🔥 = trending on social media ({len(hot_tickers)} hot stocks)"
         )
 
-        # Detailed view for each top pick
-        st.subheader("Prediction Details")
-        for r in top_results:
-            ticker_name = r["Ticker"]
+    display_top = []
+    for r in top_results:
+        row = {k: v for k, v in r.items() if not k.startswith("_")}
+        ticker = r["Ticker"]
+        if ticker in hot_tickers:
+            row["Ticker"] = f"🔥 {ticker}"
+            buzz = buzz_data.get(ticker, {})
+            row["Social Buzz"] = buzz.get("sentiment_label", "Hot")
+        else:
+            row["Social Buzz"] = "—"
+        display_top.append(row)
+
+    df = pd.DataFrame(display_top)
+    # Reorder columns: Ticker, Social Buzz, then the rest
+    cols = df.columns.tolist()
+    if "Social Buzz" in cols:
+        cols.remove("Social Buzz")
+        ticker_idx = cols.index("Ticker") + 1
+        cols.insert(ticker_idx, "Social Buzz")
+        df = df[cols]
+
+    st.dataframe(
+        df.style.format({
+            "Model P(≥20%)": "{:.1%}",
+            "Sentiment Score": "{:.1%}",
+            "Composite Score": "{:.1%}",
+            "Sentiment Polarity": "{:+.3f}",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Detailed view for each top pick
+    st.subheader("Prediction Details")
+    for r in top_results:
+        ticker_name = r["Ticker"]
+        model_p = r["Model P(≥20%)"]
+        signal = r.get("Signal", "HOLD")
+        shap_str = r.get("_explanation_str", "") or r.get("SHAP Explanation", "")
+
+        with st.expander(
+            f"**{ticker_name}** — P(≥20%): {model_p:.1%} | "
+            f"Signal: {signal} | "
+            f"Sector: {r.get('Sector', 'N/A')}"
+        ):
+            # Summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Model P(≥20%)", f"{model_p:.1%}")
+            col2.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
+            col3.metric("Mentions", r["Total Mentions"])
+            col4.metric("Signal", signal)
+
+            # Volume surge and regime indicators
+            vol_surge = r.get("Vol Surge 3d", "N/A")
+            regime_conf = r.get("Regime Confidence", "N/A")
+            ticker_cal = r.get("Ticker Calibration", 1.0)
+            col5, col6, col7, col8 = st.columns(4)
+            col5.metric(
+                "Volume Surge (3d)", vol_surge,
+                help="3-day volume relative to 20-day average",
+            )
+            if regime_conf != "N/A":
+                col6.metric(
+                    "Regime Confidence",
+                    f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
+                    help="Market regime model's predicted daily hit rate",
+                )
+            if ticker_cal != 1.0 and ticker_cal is not None:
+                col7.metric(
+                    "Ticker Calibration", f"{ticker_cal:.2f}",
+                    help="Calibration factor (<1.0 = historically underperforms)",
+                )
+            if r.get("Close Price"):
+                col8.metric("Last Close", f"${r['Close Price']:.2f}")
+
+            # SHAP-based prediction explanation
+            if shap_str:
+                st.markdown("---")
+                st.markdown("**Why This Prediction** (top SHAP features)")
+                for part in str(shap_str).split("; "):
+                    if "=" in part:
+                        feat_name, val_str = part.split("=", 1)
+                        try:
+                            val = float(val_str)
+                            color = ":green[▲]" if val > 0 else ":red[▼]"
+                            st.markdown(f"{color} **{feat_name}**: {val:+.4f}")
+                        except ValueError:
+                            st.markdown(f"- {part}")
+                    else:
+                        st.markdown(f"- {part}")
+
+    # Highlight BUY signals
+    buy_picks = [r for r in top_results if r.get("Signal") == "BUY"]
+    if buy_picks:
+        st.success(f"**{len(buy_picks)} BUY signals** in top {len(top_results)}:")
+        for r in buy_picks:
             model_p = r["Model P(≥20%)"]
-            comp = r["Composite Score"]
-            source_texts = r.get("_source_texts", [])
-            transcript_url = r.get("_transcript_url")
-            explanation = r.get("_explanation", [])
-
-            with st.expander(
-                f"**{ticker_name}** — Composite: {comp:.1%} | "
-                f"Model: {model_p:.1%} | "
-                f"Transcript: {r.get('Transcript Sentiment', 'N/A')}"
-            ):
-                # Summary metrics
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Model P(≥20%)", f"{model_p:.1%}")
-                col2.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
-                col3.metric("Mentions", r["Total Mentions"])
-                col4.metric("Composite", f"{comp:.1%}")
-
-                # Volume surge and regime indicators
-                vol_surge = r.get("Vol Surge 3d", "N/A")
-                regime_conf = r.get("Regime Confidence", "N/A")
-                ticker_cal = r.get("Ticker Calibration", 1.0)
-                col5, col6, col7 = st.columns(3)
-                col5.metric(
-                    "Volume Surge (3d)", vol_surge,
-                    help="3-day volume relative to 20-day average",
-                )
-                if regime_conf != "N/A":
-                    col6.metric(
-                        "Regime Confidence", f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
-                        help="Market regime model's predicted daily hit rate",
-                    )
-                if ticker_cal != 1.0 and ticker_cal is not None:
-                    col7.metric(
-                        "Ticker Calibration", f"{ticker_cal:.2f}",
-                        help="Calibration factor (<1.0 = historically underperforms in top picks)",
-                    )
-
-                # SHAP-based prediction explanation
-                if explanation:
-                    st.markdown("---")
-                    st.markdown(
-                        "**Why This Prediction** (top feature contributions "
-                        "from classification model)"
-                    )
-                    for item in explanation:
-                        feat = item["feature"]
-                        shap_val = item["shap_value"]
-                        direction = item["direction"]
-                        if direction == "+":
-                            color = ":green[▲]"
-                        else:
-                            color = ":red[▼]"
-                        st.markdown(
-                            f"{color} **{feat}**: {shap_val:+.4f}"
-                        )
-
-                if transcript_url:
-                    st.markdown(f"[View Full Transcript]({transcript_url})")
-
-                if source_texts:
-                    st.markdown("---")
-                    st.markdown("**Source Texts & Sentiments**")
-                    for source, text, polarity in source_texts:
-                        if polarity > 0.05:
-                            emoji = ":green[Positive]"
-                        elif polarity < -0.05:
-                            emoji = ":red[Negative]"
-                        else:
-                            emoji = ":gray[Neutral]"
-                        st.markdown(
-                            f"**{source}** ({emoji}, polarity: {polarity:+.3f})"
-                        )
-                        st.caption(text[:300])
-                else:
-                    st.info("No source texts available for this ticker.")
-
-        # Highlight top picks
-        buy_picks = [r for r in top_results if r["Signal"] == "BUY"]
-        if buy_picks:
-            st.success(f"**{len(buy_picks)} BUY signals** in top {len(top_results)}:")
-            for r in buy_picks:
-                model_p = r["Model P(≥20%)"]
-                sent_p = r["Sentiment Polarity"]
-                mentions = r["Total Mentions"]
-                comp = r["Composite Score"]
-                st.write(
-                    f"**{r['Ticker']}** — "
-                    f"Model: {model_p:.1%}, "
-                    f"Sentiment: {sent_p:+.3f} "
-                    f"({mentions} mentions), "
-                    f"Composite: {comp:.1%}"
-                )
-
-        # Show all results table (exclude internal fields)
-        with st.expander(f"All {len(results)} scanned stocks"):
-            display_results = [
-                {k: v for k, v in r.items() if not k.startswith("_")}
-                for r in results
-            ]
-            all_df = pd.DataFrame(display_results)
-            st.dataframe(
-                all_df.style.format({
-                    "Model P(≥20%)": "{:.1%}",
-                    "Sentiment Score": "{:.1%}",
-                    "Composite Score": "{:.1%}",
-                    "Sentiment Polarity": "{:+.3f}",
-                }),
-                use_container_width=True,
-                hide_index=True,
+            sent_p = r["Sentiment Polarity"]
+            mentions = r["Total Mentions"]
+            st.write(
+                f"**{r['Ticker']}** — "
+                f"Model: {model_p:.1%}, "
+                f"Sentiment: {sent_p:+.3f} "
+                f"({mentions} mentions)"
             )
 
 
