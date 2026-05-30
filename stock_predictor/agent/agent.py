@@ -30,9 +30,9 @@ You have access to the following tools:
 1. **yfinance_tool**: Fetches real-time stock data, technical indicators, and
    fundamentals from YFinance. Use this to get detailed financial data on any stock.
 
-2. **social_media_listener_tool**: Gathers social media sentiment from Reddit,
-   Finviz news, and StockTwits. Use this to gauge retail investor sentiment,
-   trending mentions, and bullish/bearish signals.
+2. **social_media_listener_tool**: Gathers social media sentiment from Reddit
+   and Finviz news. Use this to gauge retail investor sentiment, trending
+   mentions, and bullish/bearish signals.
 
 3. **stock_predictor_tool**: Runs a trained AutoML model to predict the 3-month
    forward return of a stock. The model was trained on historical YFinance data

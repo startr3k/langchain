@@ -8,7 +8,7 @@ An AI-powered stock prediction and recommendation system that combines AutoML wi
 stock_predictor/
 ├── data/
 │   ├── yfinance_client.py    # YFinance data fetching & technical indicators
-│   ├── sentiment.py          # Social media sentiment (Reddit, Finviz, StockTwits)
+│   ├── sentiment.py          # Social media sentiment (Reddit, Finviz)
 │   └── feature_engineering.py # Feature pipeline combining all data sources
 ├── models/
 │   ├── automl_model.py       # FLAML AutoML model for 3-month return prediction
@@ -32,7 +32,6 @@ stock_predictor/
 ### 2. Social Media Sentiment Analysis
 - **Reddit**: Scans r/wallstreetbets, r/stocks, r/investing, r/StockMarket, etc.
 - **Finviz**: Scrapes news headlines and computes sentiment
-- **StockTwits**: Fetches messages with bullish/bearish labels
 - Aggregates sentiment into model-ready features (polarity, mention counts, bull/bear ratio)
 
 ### 3. OpenAI LLM Agent

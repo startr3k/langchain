@@ -1,7 +1,7 @@
 """Social media and earnings call sentiment analysis for stocks.
 
 Aggregates sentiment signals from Reddit (via old.reddit.com scraping),
-Finviz news, StockTwits, and earnings call transcripts (via DuckDuckGo +
+Finviz news and earnings call transcripts (via DuckDuckGo +
 web scraping) to generate sentiment features for stock prediction.
 """
 
@@ -223,49 +223,6 @@ def fetch_finviz_sentiment(ticker: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# StockTwits Sentiment (public API)
-# ---------------------------------------------------------------------------
-
-def fetch_stocktwits_sentiment(ticker: str) -> list[dict]:
-    """Fetch StockTwits messages for a ticker and compute sentiment.
-
-    Args:
-        ticker: Stock ticker symbol.
-
-    Returns:
-        List of dicts with message-level sentiment data.
-    """
-    url = f"https://api.stocktwits.com/api/2/streams/symbol/{ticker}.json"
-    results: list[dict] = []
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.status_code != 200:
-            logger.warning("StockTwits returned %d for %s", resp.status_code, ticker)
-            return results
-
-        data = resp.json()
-        messages = data.get("messages", [])
-        for msg in messages:
-            body = msg.get("body", "")
-            st_sentiment = msg.get("entities", {}).get("sentiment", {})
-            basic = st_sentiment.get("basic") if st_sentiment else None
-            sentiment = _analyze_text_sentiment(body)
-            results.append(
-                {
-                    "source": "stocktwits",
-                    "body": body[:200],
-                    "stocktwits_sentiment": basic,
-                    "polarity": sentiment["polarity"],
-                    "subjectivity": sentiment["subjectivity"],
-                    "likes": msg.get("likes", {}).get("total", 0),
-                }
-            )
-    except Exception:
-        logger.exception("Error fetching StockTwits data for %s", ticker)
-
-    return results
-
-
 # ---------------------------------------------------------------------------
 # Aggregate Sentiment Features
 # ---------------------------------------------------------------------------
@@ -273,7 +230,7 @@ def fetch_stocktwits_sentiment(ticker: str) -> list[dict]:
 def get_sentiment_features(ticker: str) -> dict:
     """Aggregate sentiment from all sources into model-ready features.
 
-    Sources: Reddit, Finviz news, StockTwits, and earnings call transcripts.
+    Sources: Reddit, Finviz news, and earnings call transcripts.
 
     Args:
         ticker: Stock ticker symbol.
@@ -285,7 +242,6 @@ def get_sentiment_features(ticker: str) -> dict:
 
     reddit_posts = fetch_reddit_sentiment(ticker)
     finviz_news = fetch_finviz_sentiment(ticker)
-    stocktwits_msgs = fetch_stocktwits_sentiment(ticker)
     transcript_data = fetch_earnings_transcript(ticker)
 
     all_polarities: list[float] = []
@@ -317,25 +273,8 @@ def get_sentiment_features(ticker: str) -> dict:
         finviz_polarities.append(item["polarity"])
         source_texts.append((
             "Finviz News",
-            item.get("title", item.get("text", ""))[:200],
+            item.get("headline", item.get("title", ""))[:200],
             round(item["polarity"], 3),
-        ))
-
-    stocktwits_polarities: list[float] = []
-    stocktwits_bullish = 0
-    stocktwits_bearish = 0
-    for msg in stocktwits_msgs:
-        all_polarities.append(msg["polarity"])
-        all_subjectivities.append(msg["subjectivity"])
-        stocktwits_polarities.append(msg["polarity"])
-        if msg.get("stocktwits_sentiment") == "Bullish":
-            stocktwits_bullish += 1
-        elif msg.get("stocktwits_sentiment") == "Bearish":
-            stocktwits_bearish += 1
-        source_texts.append((
-            "StockTwits",
-            msg.get("body", msg.get("text", ""))[:200],
-            round(msg["polarity"], 3),
         ))
 
     # Earnings call transcript sentiment
@@ -362,14 +301,6 @@ def get_sentiment_features(ticker: str) -> dict:
         # Finviz news
         "finviz_mention_count": len(finviz_news),
         "finviz_mean_polarity": float(np.mean(finviz_polarities)) if finviz_polarities else 0.0,
-        # StockTwits
-        "stocktwits_mention_count": len(stocktwits_msgs),
-        "stocktwits_mean_polarity": float(np.mean(stocktwits_polarities)) if stocktwits_polarities else 0.0,
-        "stocktwits_bullish_count": stocktwits_bullish,
-        "stocktwits_bearish_count": stocktwits_bearish,
-        "stocktwits_bull_bear_ratio": (
-            stocktwits_bullish / max(stocktwits_bearish, 1)
-        ),
         # Earnings call transcript
         "transcript_sentiment": transcript_data.get("transcript_sentiment"),
         "transcript_polarity": transcript_data.get("transcript_polarity"),
@@ -420,10 +351,6 @@ def get_sentiment_summary(ticker: str, features: dict | None = None) -> str:
         f"avg score={features['reddit_mean_score']:.1f}",
         f"Finviz News: {features['finviz_mention_count']} headlines, "
         f"avg polarity={features['finviz_mean_polarity']:.3f}",
-        f"StockTwits: {features['stocktwits_mention_count']} messages, "
-        f"bullish={features['stocktwits_bullish_count']}, "
-        f"bearish={features['stocktwits_bearish_count']}, "
-        f"bull/bear ratio={features['stocktwits_bull_bear_ratio']:.2f}",
         f"Earnings Call: sentiment={transcript_sent if transcript_sent is not None else 'N/A'}"
         + (f", url={transcript_url}" if transcript_url else ""),
     ]
