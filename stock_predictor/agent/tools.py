@@ -2,7 +2,7 @@
 
 Three tools:
 1. YFinanceTool — fetches market data and fundamentals
-2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz / StockTwits
+2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz
 3. StockPredictorTool — runs the AutoML model to predict 3-month returns
 """
 
@@ -94,7 +94,7 @@ def yfinance_tool(ticker: str) -> str:
 
 @tool
 def social_media_listener_tool(ticker: str) -> str:
-    """Fetch social media sentiment for a stock from Reddit, Finviz, and StockTwits.
+    """Fetch social media sentiment for a stock from Reddit and Finviz.
 
     Use this tool to understand what retail investors and the public think about
     a stock. It aggregates sentiment from multiple social media and news sources.
@@ -104,7 +104,7 @@ def social_media_listener_tool(ticker: str) -> str:
 
     Returns:
         Detailed sentiment summary including polarity scores, mention counts,
-        and bullish/bearish ratios from Reddit, Finviz news, and StockTwits.
+        and bullish/bearish ratios from Reddit and Finviz news.
     """
     features = get_sentiment_features(ticker)
     summary = get_sentiment_summary(ticker, features=features)
