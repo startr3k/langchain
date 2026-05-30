@@ -28,6 +28,12 @@ stock_predictor/models/saved/*.pkl
 .DS_Store
 Thumbs.db
 
+# Runtime caches
+eligible_tickers_cache.json
+daily_picks.csv
+social_buzz.csv
+scheduler_config.json
+
 # Pytest
 .pytest_cache/
 htmlcov/

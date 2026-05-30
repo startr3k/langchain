@@ -130,7 +130,7 @@ def social_media_listener_tool(ticker: str) -> str:
 
 
 @tool
-def stock_predictor_tool(ticker: str) -> str:
+def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> str:
     """Predict the 3-month forward return for a stock using the trained AutoML model.
 
     This tool combines YFinance data and social media sentiment features, then
@@ -139,6 +139,8 @@ def stock_predictor_tool(ticker: str) -> str:
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA').
+        min_market_cap_millions: Minimum market cap in millions of dollars.
+            Default 100 ($100M). Use 1000 for high-conviction large-cap mode.
 
     Returns:
         JSON with the predicted 3-month return percentage and model confidence.
@@ -151,7 +153,9 @@ def stock_predictor_tool(ticker: str) -> str:
             "ticker": ticker,
         })
 
-    result = predictor.predict_ticker(ticker)
+    result = predictor.predict_ticker(
+        ticker, min_market_cap=min_market_cap_millions * 1_000_000
+    )
 
     # Add feature importance context
     importance = predictor.get_feature_importance(top_n=10)
@@ -166,17 +170,18 @@ def stock_predictor_tool(ticker: str) -> str:
 
 @tool
 def scan_trending_stocks_tool(top_n: int = 10) -> str:
-    """Scan trending NASDAQ stocks and predict their 3-month returns.
+    """Scan trending NASDAQ stocks and predict which will gain >=20% in 3 months.
 
-    Identifies trending stocks from social media and runs the prediction
-    model on each to find high-return candidates.
+    Identifies trending stocks from social media and runs the ensemble
+    model (classification + LTR ranking) on each to find
+    high-probability candidates.
 
     Args:
         top_n: Number of trending stocks to scan (default 10).
 
     Returns:
-        JSON with predicted returns for each trending stock, sorted by
-        predicted return.
+        JSON with predicted probabilities for each trending stock, sorted by
+        probability of >=20% gain.
     """
     predictor = _get_predictor()
 
@@ -196,12 +201,12 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
     for ticker in all_tickers:
         try:
             prediction = predictor.predict_ticker(ticker)
-            if prediction.get("predicted_return_3m") is not None:
+            if prediction.get("probability_gain") is not None:
                 results.append(prediction)
         except Exception:
             logger.warning("Failed to predict for %s", ticker)
 
-    results.sort(key=lambda x: x.get("predicted_return_3m", -999), reverse=True)
+    results.sort(key=lambda x: x.get("probability_gain", -1), reverse=True)
 
     return json.dumps(
         {
