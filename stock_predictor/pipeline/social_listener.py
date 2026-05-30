@@ -64,11 +64,21 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
 
     tickers: set[str] = set()
 
+    # Wikipedia blocks requests without a User-Agent header.
+    _wiki_headers = {"User-Agent": "StockPredictor/1.0 (python-requests)"}
+
+    def _wiki_read_html(url: str, match: str) -> list[pd.DataFrame]:
+        from io import StringIO
+
+        resp = requests.get(url, headers=_wiki_headers, timeout=15)
+        resp.raise_for_status()
+        return pd.read_html(StringIO(resp.text), match=match)
+
     # S&P 500 from Wikipedia
     try:
-        tables = pd.read_html(
+        tables = _wiki_read_html(
             "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            match="Symbol",
+            "Symbol",
         )
         if tables:
             sp500 = tables[0]
@@ -83,9 +93,9 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
 
     # NASDAQ-100 from Wikipedia
     try:
-        tables = pd.read_html(
+        tables = _wiki_read_html(
             "https://en.wikipedia.org/wiki/Nasdaq-100",
-            match="Ticker",
+            "Ticker",
         )
         if tables:
             ndx = tables[-1]
