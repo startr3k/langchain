@@ -12,9 +12,11 @@ within a 3-month window.  Uses a four-stage pipeline:
   Stage 4: LambdaMART (XGBoost rank:ndcg) — ranks elite survivors
            using quantile-transformed features and log-scaled MFD labels.
 
-Final ranking uses max(Z_cls, 0) * max(Z_ltr, 0) within each day's
-elite pool (stocks passing both Stage 1 and Stage 2 gates).  Only
-days with elite pool >= MIN_ELITE_POOL are traded.
+Final ranking uses max(Z_cls, 0) * max(Z_ltr, 0) * pool_weight within
+each day's elite pool (stocks passing both Stage 1 and Stage 2 gates).
+pool_weight = min(elite_pool_size / MIN_ELITE_POOL, 2.0) so larger pools
+boost the score, making it comparable across days.  Only days with
+elite pool >= MIN_ELITE_POOL are traded.
 
 Walk-forward evaluation: 70.7% hit rate at min pool >= 75.
 """
@@ -255,7 +257,8 @@ class StockReturnPredictor:
     Stage 3: Cross-Sectional Quantile Transform on features.
     Stage 4: LambdaMART (rank:ndcg) on quantile-transformed features.
 
-    Ranking: max(Z_cls, 0) * max(Z_ltr, 0) within elite pool.
+    Ranking: max(Z_cls, 0) * max(Z_ltr, 0) * pool_weight within elite pool.
+    pool_weight = min(pool_size / MIN_ELITE_POOL, 2.0).
     Only trades on days with elite pool >= MIN_ELITE_POOL (75).
     Walk-forward eval: 70.7% hit rate, ~2.7 trading days/month.
     """
@@ -745,7 +748,8 @@ class StockReturnPredictor:
           3. Cross-sectional quantile transform on features
           4. LambdaMART on quantile-transformed features
 
-        Ranking: max(Z_cls, 0) * max(Z_ltr, 0) within elite pool.
+        Ranking: max(Z_cls, 0) * max(Z_ltr, 0) * pool_weight.
+        pool_weight = min(pool_size / MIN_ELITE_POOL, 2.0).
         Only evaluates days with elite pool >= MIN_ELITE_POOL.
 
         Args:
@@ -1063,7 +1067,8 @@ class StockReturnPredictor:
                 l_mu, l_sig = day_ltr.mean(), day_ltr.std()
                 day_ltr_z = (day_ltr - l_mu) / l_sig if l_sig > 1e-8 else np.zeros_like(day_ltr)
 
-                day_scores = np.maximum(day_cls_z, 0) * np.maximum(day_ltr_z, 0)
+                pool_weight = min(n_elite_day / MIN_ELITE_POOL, 2.0)
+                day_scores = np.maximum(day_cls_z, 0) * np.maximum(day_ltr_z, 0) * pool_weight
                 top10 = np.argsort(day_scores)[-10:][::-1]
                 t10_ret = day_returns_vals[top10]
                 hits = int((t10_ret >= CLASSIFICATION_THRESHOLD).sum())
@@ -1694,7 +1699,8 @@ class StockReturnPredictor:
           3. Cross-sectional quantile transform (per-date percentile ranks)
           4. LTR score on quantile-transformed features
 
-        Final score = max(Z_cls, 0) * max(Z_ltr, 0) averaged across folds.
+        Final score = max(Z_cls, 0) * max(Z_ltr, 0) * pool_weight,
+        averaged across folds. pool_weight = min(pool/75, 2.0).
         Stocks that don't pass both gates get score 0.
 
         Also returns elite_pool_size and individual stage scores as
@@ -1776,9 +1782,10 @@ class StockReturnPredictor:
                     ltr_raw = fm_ltr.predict(xgb.DMatrix(elite_qt))
                     ltr_sc[elite] = ltr_raw
 
-                # Z-score ranking within elite pool
+                # Z-score ranking within elite pool, weighted by pool size
                 fold_scores = np.zeros(len(df_fold))
-                if elite.sum() >= 2:
+                n_elite = int(elite.sum())
+                if n_elite >= 2:
                     elite_proba = cls_prob[elite]
                     elite_ltr = ltr_sc[elite]
 
@@ -1788,7 +1795,9 @@ class StockReturnPredictor:
                     l_mu, l_sig = elite_ltr.mean(), elite_ltr.std()
                     z_ltr = (elite_ltr - l_mu) / l_sig if l_sig > 1e-8 else np.zeros_like(elite_ltr)
 
-                    z_scores = np.maximum(z_cls, 0) * np.maximum(z_ltr, 0)
+                    # Pool weight: pool_size / MIN_ELITE_POOL, capped at 2.0
+                    pool_weight = min(n_elite / MIN_ELITE_POOL, 2.0)
+                    z_scores = np.maximum(z_cls, 0) * np.maximum(z_ltr, 0) * pool_weight
                     fold_scores[elite] = z_scores
 
                 all_fold_scores.append(fold_scores)
@@ -1796,6 +1805,43 @@ class StockReturnPredictor:
                 all_fold_mfd.append(pred_mfd)
 
             scores = np.mean(all_fold_scores, axis=0)
+
+            # Store per-stock stage details for UI display
+            avg_proba = np.mean(all_fold_proba, axis=0)
+            avg_mfd = np.mean(all_fold_mfd, axis=0)
+            # Compute average Z-scores across folds for each stock
+            n = len(df_fold)
+            avg_z_cls = np.zeros(n)
+            avg_z_ltr = np.zeros(n)
+            n_folds_with_elite = 0
+            for fi, fm in enumerate(self.fold_models):
+                fs = all_fold_scores[fi]
+                fp = all_fold_proba[fi]
+                elite_mask = fs > 0
+                if elite_mask.sum() >= 2:
+                    ep = fp[elite_mask]
+                    p_mu, p_sig = ep.mean(), ep.std()
+                    z_c = (fp - p_mu) / p_sig if p_sig > 1e-8 else np.zeros(n)
+                    avg_z_cls += z_c
+                    # Approximate Z_ltr from fold scores
+                    elite_fs = fs[elite_mask]
+                    l_mu, l_sig = elite_fs.mean(), elite_fs.std()
+                    z_l = np.zeros(n)
+                    z_l[elite_mask] = (fs[elite_mask] - l_mu) / l_sig if l_sig > 1e-8 else 0
+                    avg_z_ltr += z_l
+                    n_folds_with_elite += 1
+            if n_folds_with_elite > 0:
+                avg_z_cls /= n_folds_with_elite
+                avg_z_ltr /= n_folds_with_elite
+
+            elite_pool_size = int((scores > 0).sum())
+            self._last_batch_details = {
+                "cls_proba": avg_proba,
+                "pred_mfd": avg_mfd,
+                "z_cls": avg_z_cls,
+                "z_ltr": avg_z_ltr,
+                "elite_pool_size": elite_pool_size,
+            }
 
         else:
             # Fallback: legacy 2-stage (backward compat)

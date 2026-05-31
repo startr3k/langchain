@@ -34,6 +34,11 @@ CSV_COLUMNS = [
     "probability",
     "signal",
     "ensemble_score",
+    "elite_pool_size",
+    "cls_proba",
+    "pred_mfd",
+    "z_cls",
+    "z_ltr",
     "ltr_score",
     "classification_score",
     "volume_surge_3d",
@@ -132,6 +137,11 @@ def run_daily_picks(
             "probability": round(r.get("probability_gain", 0), 4),
             "signal": r.get("signal", "HOLD"),
             "ensemble_score": round(r.get("ensemble_score", r.get("probability_gain", 0)), 4),
+            "elite_pool_size": r.get("elite_pool_size", 0),
+            "cls_proba": r.get("cls_proba", 0),
+            "pred_mfd": r.get("pred_mfd", 0),
+            "z_cls": r.get("z_cls", 0),
+            "z_ltr": r.get("z_ltr", 0),
             "ltr_score": round(r.get("ltr_score", 0), 4),
             "classification_score": round(r.get("classification_score", r.get("probability_gain", 0)), 4),
             "volume_surge_3d": round(r.get("volume_surge_3d", 0), 2) if r.get("volume_surge_3d") else None,
@@ -322,14 +332,30 @@ def _batch_score_from_cache(
         apply_adjustments=True,
     )
 
-    # Compute elite pool size (stocks with non-zero score = passed both gates)
-    elite_pool_size = int((scores > 0).sum())
+    # Extract per-stock stage details from 4-stage pipeline
+    batch_details = getattr(predictor, "_last_batch_details", None)
+    if batch_details:
+        elite_pool_size = batch_details["elite_pool_size"]
+        cls_proba = batch_details["cls_proba"]
+        pred_mfd = batch_details["pred_mfd"]
+        z_cls = batch_details["z_cls"]
+        z_ltr = batch_details["z_ltr"]
+    else:
+        elite_pool_size = int((scores > 0).sum())
+        cls_proba = np.zeros(len(scores))
+        pred_mfd = np.zeros(len(scores))
+        z_cls = np.zeros(len(scores))
+        z_ltr = np.zeros(len(scores))
     logger.info("Elite pool size: %d / %d tickers", elite_pool_size, len(scores))
 
     # Build results with scores
     scored = pd.DataFrame({
         "ticker": tickers,
         "ensemble_score": scores,
+        "cls_proba": cls_proba,
+        "pred_mfd": pred_mfd,
+        "z_cls": z_cls,
+        "z_ltr": z_ltr,
     })
 
     # Merge back ALL feature columns (needed for SHAP explanations + output)
@@ -431,6 +457,10 @@ def _batch_score_from_cache(
             "signal": "BUY",
             "ensemble_score": float(row["ensemble_score"]),
             "elite_pool_size": elite_pool_size,
+            "cls_proba": round(float(row.get("cls_proba", 0)), 4),
+            "pred_mfd": round(float(row.get("pred_mfd", 0)), 4),
+            "z_cls": round(float(row.get("z_cls", 0)), 3),
+            "z_ltr": round(float(row.get("z_ltr", 0)), 3),
             "ltr_score": 0.0,
             "classification_score": 0.0,
             "volume_surge_3d": round(float(row.get("Volume_Surge_3d", 0)), 2) if pd.notna(row.get("Volume_Surge_3d")) else None,

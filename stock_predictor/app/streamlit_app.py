@@ -155,6 +155,12 @@ if page == "Top Recommendations":
             results.append({
                 "Ticker": row["ticker"],
                 "Model P(≥20%)": round(prob, 4),
+                "Classifier P": float(row.get("cls_proba", 0)) if pd.notna(row.get("cls_proba")) else 0.0,
+                "Pred MFD": float(row.get("pred_mfd", 0)) if pd.notna(row.get("pred_mfd")) else 0.0,
+                "Z_cls": float(row.get("z_cls", 0)) if pd.notna(row.get("z_cls")) else 0.0,
+                "Z_ltr": float(row.get("z_ltr", 0)) if pd.notna(row.get("z_ltr")) else 0.0,
+                "Score": float(row.get("ensemble_score", 0)) if pd.notna(row.get("ensemble_score")) else 0.0,
+                "Elite Pool Size": int(row.get("elite_pool_size", 0)) if pd.notna(row.get("elite_pool_size")) else 0,
                 "Sentiment Score": round(sentiment_normalized, 4),
                 "Composite Score": round(prob, 4),  # pipeline already ranked by ensemble
                 "Signal": row.get("signal", "BUY"),
@@ -277,9 +283,24 @@ if page == "Top Recommendations":
         cols.insert(ticker_idx, "Social Buzz")
         df = df[cols]
 
+    # Show elite pool size banner if available
+    pool_sizes = [r.get("Elite Pool Size", 0) for r in top_results]
+    avg_pool = max(pool_sizes) if pool_sizes else 0
+    if avg_pool > 0:
+        pool_color = "green" if avg_pool >= 75 else "orange" if avg_pool >= 25 else "red"
+        st.markdown(
+            f"**Elite Pool Size: :{pool_color}[{avg_pool}]** "
+            f"({'Strong signal — pool ≥ 75' if avg_pool >= 75 else 'Moderate signal' if avg_pool >= 25 else 'Weak signal — consider sitting out'})"
+        )
+
     st.dataframe(
         df.style.format({
             "Model P(≥20%)": "{:.1%}",
+            "Classifier P": "{:.1%}",
+            "Pred MFD": "{:.1%}",
+            "Z_cls": "{:+.2f}",
+            "Z_ltr": "{:+.2f}",
+            "Score": "{:.3f}",
             "Sentiment Score": "{:.1%}",
             "Composite Score": "{:.1%}",
             "Sentiment Polarity": "{:+.3f}",
@@ -296,40 +317,76 @@ if page == "Top Recommendations":
         signal = r.get("Signal", "HOLD")
         shap_str = r.get("_explanation_str", "") or r.get("SHAP Explanation", "")
 
+        cls_p = r.get("Classifier P", 0)
+        pred_mfd = r.get("Pred MFD", 0)
+        z_cls = r.get("Z_cls", 0)
+        z_ltr = r.get("Z_ltr", 0)
+        score = r.get("Score", 0)
+        pool = r.get("Elite Pool Size", 0)
+
         with st.expander(
-            f"**{ticker_name}** — P(≥20%): {model_p:.1%} | "
-            f"Signal: {signal} | "
+            f"**{ticker_name}** — P: {cls_p:.1%} | "
+            f"MFD: {pred_mfd:.1%} | "
+            f"Score: {score:.3f} | "
             f"Sector: {r.get('Sector', 'N/A')}"
         ):
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Model P(≥20%)", f"{model_p:.1%}")
-            col2.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
-            col3.metric("Mentions", r["Total Mentions"])
-            col4.metric("Signal", signal)
-
-            # Volume surge and regime indicators
-            vol_surge = r.get("Vol Surge 3d", "N/A")
-            regime_conf = r.get("Regime Confidence", "N/A")
-            ticker_cal = r.get("Ticker Calibration", 1.0)
-            col5, col6, col7, col8 = st.columns(4)
+            # 4-stage pipeline scores
+            st.markdown("**4-Stage Pipeline Scores**")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric(
+                "Classifier P", f"{cls_p:.1%}",
+                help="Stage 1: P(MFD ≥ 20%). Gate: P ≥ 0.50",
+            )
+            col2.metric(
+                "Pred MFD", f"{pred_mfd:.1%}",
+                help="Stage 2: Predicted max forward drawdown. Gate: ≥ 25%",
+            )
+            col3.metric(
+                "Z_cls", f"{z_cls:+.2f}",
+                help="Z-score of classifier probability within elite pool",
+            )
+            col4.metric(
+                "Z_ltr", f"{z_ltr:+.2f}",
+                help="Z-score of LTR ranking within elite pool",
+            )
             col5.metric(
+                "Final Score", f"{score:.3f}",
+                help="max(Z_cls, 0) × max(Z_ltr, 0) — both must be above avg",
+            )
+
+            # Pool size and signal strength
+            col6, col7, col8, col9 = st.columns(4)
+            col6.metric(
+                "Elite Pool", pool,
+                help="Stocks passing both gates today. ≥75 = strong signal",
+            )
+            col7.metric("Signal", signal)
+            vol_surge = r.get("Vol Surge 3d", "N/A")
+            col8.metric(
                 "Volume Surge (3d)", vol_surge,
                 help="3-day volume relative to 20-day average",
             )
-            if regime_conf != "N/A":
-                col6.metric(
-                    "Regime Confidence",
-                    f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
-                    help="Market regime model's predicted daily hit rate",
-                )
-            if ticker_cal != 1.0 and ticker_cal is not None:
-                col7.metric(
-                    "Ticker Calibration", f"{ticker_cal:.2f}",
-                    help="Calibration factor (<1.0 = historically underperforms)",
-                )
             if r.get("Close Price"):
-                col8.metric("Last Close", f"${r['Close Price']:.2f}")
+                col9.metric("Last Close", f"${r['Close Price']:.2f}")
+
+            # Additional context
+            regime_conf = r.get("Regime Confidence", "N/A")
+            ticker_cal = r.get("Ticker Calibration", 1.0)
+            if regime_conf != "N/A" or (ticker_cal != 1.0 and ticker_cal is not None):
+                col10, col11, col12, col13 = st.columns(4)
+                if regime_conf != "N/A":
+                    col10.metric(
+                        "Regime Confidence",
+                        f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
+                        help="Market regime model's predicted daily hit rate",
+                    )
+                if ticker_cal != 1.0 and ticker_cal is not None:
+                    col11.metric(
+                        "Ticker Calibration", f"{ticker_cal:.2f}",
+                        help="Calibration factor (<1.0 = historically underperforms)",
+                    )
+                col12.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
+                col13.metric("Mentions", r["Total Mentions"])
 
             # SHAP-based prediction explanation
             if shap_str:

@@ -276,10 +276,30 @@ def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.
         apply_adjustments=True,
     )
 
+    # Extract 4-stage pipeline details
+    batch_details = getattr(predictor, "_last_batch_details", None)
+    if batch_details:
+        elite_pool_size = batch_details["elite_pool_size"]
+        cls_proba = batch_details["cls_proba"]
+        pred_mfd = batch_details["pred_mfd"]
+        z_cls_arr = batch_details["z_cls"]
+        z_ltr_arr = batch_details["z_ltr"]
+    else:
+        elite_pool_size = int((scores > 0).sum())
+        cls_proba = None
+        pred_mfd = None
+        z_cls_arr = None
+        z_ltr_arr = None
+
     scored = pd.DataFrame({
         "ticker": tickers,
         "ensemble_score": scores,
     })
+    if cls_proba is not None:
+        scored["cls_proba"] = cls_proba
+        scored["pred_mfd"] = pred_mfd
+        scored["z_cls"] = z_cls_arr
+        scored["z_ltr"] = z_ltr_arr
     scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
 
     # Filter by eligible ticker universe (>= min market cap)
@@ -294,15 +314,28 @@ def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.
 
     results = []
     for _, row in top_picks.iterrows():
-        results.append({
+        pick = {
             "ticker": row["ticker"],
             "ensemble_score": round(float(row["ensemble_score"]), 4),
             "rank": len(results) + 1,
-        })
+        }
+        if "cls_proba" in row.index:
+            pick["classifier_P"] = round(float(row["cls_proba"]), 4)
+            pick["predicted_MFD"] = f"{float(row['pred_mfd']):.1%}"
+            pick["Z_cls"] = round(float(row["z_cls"]), 2)
+            pick["Z_ltr"] = round(float(row["z_ltr"]), 2)
+        results.append(pick)
 
     return json.dumps(
         {
             "total_tickers_scored": len(scored),
+            "elite_pool_size": elite_pool_size,
+            "pool_signal": (
+                "Strong — pool >= 75"
+                if elite_pool_size >= 75
+                else "Moderate" if elite_pool_size >= 25
+                else "Weak — consider sitting out"
+            ),
             "top_picks": results,
             "min_market_cap_filter": f"${min_market_cap_billions}B",
             "source": "Full 616-ticker NASDAQ training universe",
