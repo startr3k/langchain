@@ -339,8 +339,8 @@ def _batch_score_from_cache(
     import yfinance as yf
     from stock_predictor.pipeline.social_listener import get_eligible_tickers
 
-    # Use the cached eligible ticker universe (Dow/S&P/NASDAQ >= $1B)
-    # instead of querying yfinance for all 670 tickers each run.
+    # Use the cached eligible ticker universe (616 NASDAQ-only, >= $100M)
+    # instead of querying yfinance for all tickers each run.
     eligible_set = get_eligible_tickers()
     all_tickers = scored["ticker"].tolist()
     logger.info(
@@ -531,7 +531,7 @@ def _get_shap_explanation(
 
 
 def _get_major_index_tickers() -> list[str]:
-    """Return a list of tickers from major US indices (S&P 500, Dow, NASDAQ-100)."""
+    """Return a list of tickers from NASDAQ (fallback for eligible ticker fetch)."""
     # Use yfinance or a static list — prefer fetching dynamically
     import yfinance as yf
 

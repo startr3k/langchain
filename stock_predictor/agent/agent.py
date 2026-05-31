@@ -23,7 +23,7 @@ from stock_predictor.agent.tools import (
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an expert investment analyst specializing in US tech stocks (NASDAQ + select NYSE tech).
+SYSTEM_PROMPT = """You are an expert investment analyst specializing in US NASDAQ tech stocks.
 Your goal is to identify stocks with high potential returns in the next 3 months.
 
 You have access to the following tools:
@@ -44,9 +44,9 @@ You have access to the following tools:
    candidates. Fast but limited to ~10-20 trending tickers.
 
 5. **scan_full_universe_tool**: Scans ALL 616 NASDAQ tickers from the training
-   dataset, batch-scores them in ~5 seconds, filters by market cap (>=$1B), and
+   dataset, batch-scores them in ~5 seconds, filters by market cap (>=$100M), and
    returns the top-N ranked picks. This is the comprehensive scan covering the
-   entire stock universe.
+   entire NASDAQ stock universe.
 
 ## Choosing the Right Scan Tool:
 - Use **scan_full_universe_tool** when the user asks for:

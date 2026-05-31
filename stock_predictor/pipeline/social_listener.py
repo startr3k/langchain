@@ -1,6 +1,6 @@
 """Social media & market buzz listener — surfaces the top-20 hottest stocks
-from Yahoo Finance, Finviz news, and GDELT that are listed on Dow, S&P 500,
-or NASDAQ with market cap >= $1B.
+from Yahoo Finance, Finviz news, and GDELT that are listed on NASDAQ
+with market cap >= $100M.
 
 Data sources:
   - Yahoo Finance Trending (real-time trending tickers)
@@ -33,7 +33,7 @@ _TICKER_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "eligible_t
 _TICKER_CACHE_MAX_AGE_HOURS = 24  # refresh if older than this
 
 # ---------------------------------------------------------------------------
-# Dynamic index-ticker fetching (>= $1B market cap on Dow / S&P / NASDAQ)
+# Dynamic index-ticker fetching (>= $100M market cap, NASDAQ-only)
 # ---------------------------------------------------------------------------
 
 # Fallback curated list in case dynamic fetch fails
@@ -61,15 +61,15 @@ _FALLBACK_TICKERS: set[str] = {
     "HCA", "ELV", "HUM", "CVS",
 }
 
-MIN_MARKET_CAP = 1_000_000_000  # $1B
+MIN_MARKET_CAP = 100_000_000  # $100M
 
 
 @lru_cache(maxsize=1)
 def _fetch_index_tickers_cached() -> frozenset[str]:
-    """Fetch tickers from S&P 500, Dow, and NASDAQ-100 via Wikipedia/yfinance.
+    """Fetch NASDAQ tickers via Wikipedia/yfinance.
 
     Uses Wikipedia tables as a reliable public source for index constituents,
-    then filters to >= $1B market cap via yfinance.  Results are cached for
+    then filters to >= $100M market cap via yfinance.  Results are cached for
     the lifetime of the process (typically one Streamlit session).
     """
     import pandas as pd
@@ -133,7 +133,7 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
         return frozenset(_FALLBACK_TICKERS)
 
     # Filter by market cap >= $1B using yfinance (batch download for speed)
-    logger.info("Filtering %d tickers by market cap >= $1B...", len(tickers))
+    logger.info("Filtering %d tickers by market cap >= $100M...", len(tickers))
     filtered: set[str] = set()
     try:
         import yfinance as yf
@@ -161,7 +161,7 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
     if not filtered:
         filtered = tickers
 
-    logger.info("Filtered to %d tickers with market cap >= $1B", len(filtered))
+    logger.info("Filtered to %d tickers with market cap >= $100M", len(filtered))
     return frozenset(filtered)
 
 
@@ -202,7 +202,7 @@ def _save_ticker_cache(tickers: set[str]) -> None:
 
 
 def get_eligible_tickers(*, force_refresh: bool = False) -> set[str]:
-    """Return the set of eligible tickers (Dow/S&P/NASDAQ, >= $1B market cap).
+    """Return the set of eligible tickers (NASDAQ, >= $100M market cap).
 
     Uses a disk-based cache (JSON file) that refreshes every 24 hours.
     Pass ``force_refresh=True`` to bypass the cache.
@@ -284,7 +284,7 @@ def scan_reddit_hot(top_n: int = 20) -> list[dict]:
     """Scan Reddit finance subreddits for trending tickers.
 
     Returns a list of dicts: {ticker, score, avg_sentiment, source}.
-    Only includes tickers on Dow/S&P/NASDAQ with >= $1B market cap.
+    Only includes NASDAQ tickers with >= $100M market cap.
     Gracefully returns empty list if Reddit blocks the request.
     """
     from bs4 import BeautifulSoup
@@ -577,7 +577,7 @@ def scan_gdelt_news(tickers: list[str], max_tickers: int = 20) -> list[dict]:
 
 def get_social_hottest(top_n: int = 20) -> list[dict]:
     """Aggregate Reddit, Yahoo Finance, Finviz, and GDELT to find the top-N
-    hottest stocks from Dow, S&P 500, and NASDAQ with >= $1B market cap.
+    hottest NASDAQ stocks with >= $100M market cap.
 
     Returns a list of dicts sorted by combined engagement score:
         {ticker, mentions, avg_sentiment, engagement_score, sources, ...}
