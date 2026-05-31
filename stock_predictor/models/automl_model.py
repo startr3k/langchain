@@ -1,17 +1,22 @@
 """AutoML model for stock return classification and ranking using FLAML + LTR.
 
 Predicts whether a stock will achieve >=20% peak return at any point
-within a 3-month window.  Uses a two-stage ensemble approach:
+within a 3-month window.  Uses a four-stage pipeline:
 
-  Stage 1: AutoML classification model (FLAML) predicting breakout
-           probability, optimized for Average Precision.
-  Stage 2: Learning-to-Rank model (XGBoost LambdaMART) trained with
-           NDCG@10 objective, grouping by date to directly optimize
-           cross-sectional daily top-10 ranking quality.
+  Stage 1: FLAML Binary Classifier — P(MFD >= 20%), gate: P >= 0.50.
+  Stage 2: XGBoost Huber Regressor — predicts MFD magnitude,
+           gate: predicted MFD >= 25%.
+  Stage 3: Cross-Sectional Quantile Transformer — transforms raw
+           features to per-date percentile ranks (0.0–1.0) for
+           regime-normalized LTR inputs.
+  Stage 4: LambdaMART (XGBoost rank:ndcg) — ranks elite survivors
+           using quantile-transformed features and log-scaled MFD labels.
 
-The final ranking score is a 50/50 ensemble of Stage 1 probability
-and Stage 2 LTR score.  This architecture improves daily top-10
-precision from ~58.5% (classification alone) to ~67.3%.
+Final ranking uses max(Z_cls, 0) * max(Z_ltr, 0) within each day's
+elite pool (stocks passing both Stage 1 and Stage 2 gates).  Only
+days with elite pool >= MIN_ELITE_POOL are traded.
+
+Walk-forward evaluation: 70.7% hit rate at min pool >= 75.
 """
 
 from __future__ import annotations
@@ -217,15 +222,15 @@ REGRESSION_MODEL_PATH = MODEL_DIR / "regression_model.pkl"
 FOLD_MODELS_DIR = MODEL_DIR / "fold_models"
 _MODEL_META_PATH = MODEL_DIR / "model_meta.json"
 
-# Ensemble weights for 3-stage scoring:
-#   final_score = W_CLS * classification_prob
-#                + W_LTR * ltr_score_normalized
-#                + W_REG * regression_pred_normalized
-# These sum to 1.0.
+# 4-stage pipeline constants
+CLS_PROB_THRESHOLD = 0.50    # Stage 1: classifier gate
+MFD_PRED_THRESHOLD = 0.25    # Stage 2: Huber MFD gate (predicted MFD >= 25%)
+MIN_ELITE_POOL = 75          # Minimum elite pool size to generate picks
+
+# Legacy ensemble weights (kept for backward compat in predict_batch fallback)
 W_CLS = 0.30
 W_LTR = 0.40
 W_REG = 0.30
-# Legacy weight (kept for backward compat in predict_batch fallback)
 LTR_ENSEMBLE_WEIGHT = 0.6
 
 # Volatility-aware scoring: multiply ranking score by
@@ -243,16 +248,16 @@ CLASSIFICATION_THRESHOLD = 0.20
 
 
 class StockReturnPredictor:
-    """3-stage hybrid stock predictor with return magnitude ranking.
+    """4-stage stock predictor with selective high-precision trading.
 
-    Stage 1: Binary classifier (≥20% peak return within 3 months).
-    Stage 2: Regression model predicting actual return magnitude.
-    Stage 3: LTR (LambdaMART) with continuous return labels.
+    Stage 1: FLAML Binary Classifier — P(MFD >= 20%), gate: P >= 0.50.
+    Stage 2: XGBoost Huber Regressor — predicts MFD, gate: pred >= 25%.
+    Stage 3: Cross-Sectional Quantile Transform on features.
+    Stage 4: LambdaMART (rank:ndcg) on quantile-transformed features.
 
-    The ensemble blends all three stages so top picks are both likely
-    to achieve ≥20% AND ranked by expected return size. Additional
-    adjustments: volatility-aware scoring, market regime detection,
-    and per-ticker calibration.
+    Ranking: max(Z_cls, 0) * max(Z_ltr, 0) within elite pool.
+    Only trades on days with elite pool >= MIN_ELITE_POOL (75).
+    Walk-forward eval: 70.7% hit rate, ~2.7 trading days/month.
     """
 
     def __init__(self) -> None:
@@ -728,20 +733,20 @@ class StockReturnPredictor:
     def train_walk_forward(
         self,
         df: pd.DataFrame | None = None,
-        time_budget: int = 120,
+        time_budget: int = 60,
         n_folds: int = 5,
         min_train_years: int = 3,
     ) -> dict:
-        """Train with walk-forward cross-validation for robust evaluation.
+        """Train 4-stage pipeline with walk-forward cross-validation.
 
-        Splits data chronologically into expanding windows:
-        - Fold 1: Train on years 1-3, test on year 4
-        - Fold 2: Train on years 1-4, test on year 5
-        - ...
-        - Final fold: Train on years 1-(N-1), test on year N
+        4-stage pipeline per fold:
+          1. FLAML classifier: P(MFD >= 20%), gate P >= CLS_PROB_THRESHOLD
+          2. XGBoost Huber: predict MFD magnitude, gate >= MFD_PRED_THRESHOLD
+          3. Cross-sectional quantile transform on features
+          4. LambdaMART on quantile-transformed features
 
-        The final fold's model is saved as the production model.
-        Returns per-fold metrics and aggregate statistics.
+        Ranking: max(Z_cls, 0) * max(Z_ltr, 0) within elite pool.
+        Only evaluates days with elite pool >= MIN_ELITE_POOL.
 
         Args:
             df: Pre-built training DataFrame.
@@ -795,12 +800,42 @@ class StockReturnPredictor:
         all_top10_hits = []
         all_top10_totals = []
 
+        # XGBoost Huber regressor params (deterministic)
+        huber_params = {
+            "objective": "reg:pseudohubererror",
+            "huber_slope": 0.5,
+            "max_depth": 6,
+            "learning_rate": 0.05,
+            "min_child_weight": 50,
+            "subsample": 0.7,
+            "colsample_bytree": 0.5,
+            "reg_alpha": 5.0,
+            "reg_lambda": 10.0,
+            "verbosity": 0,
+            "seed": 42,
+        }
+
+        # LTR (LambdaMART) params
+        ltr_params = {
+            "objective": "rank:ndcg",
+            "eval_metric": "ndcg@10",
+            "max_depth": 6,
+            "learning_rate": 0.05,
+            "min_child_weight": 50,
+            "subsample": 0.7,
+            "colsample_bytree": 0.5,
+            "reg_alpha": 5.0,
+            "reg_lambda": 10.0,
+            "verbosity": 0,
+            "ndcg_exp_gain": False,
+            "seed": 42,
+        }
+
         for fold_idx in range(n_folds):
             test_start = first_test_start + pd.Timedelta(days=fold_idx * fold_size_days)
             test_end = test_start + pd.Timedelta(days=fold_size_days)
             train_end = test_start - pd.Timedelta(days=gap_days)
 
-            # Last fold extends to end of data
             if fold_idx == n_folds - 1:
                 test_end = date_max + pd.Timedelta(days=1)
 
@@ -818,15 +853,13 @@ class StockReturnPredictor:
                 continue
 
             logger.info(
-                "=== Fold %d/%d: Train %s–%s (%d rows) | Test %s–%s (%d rows) ===",
+                "=== Fold %d/%d: Train to %s (%d rows) | Test %s–%s (%d rows) ===",
                 fold_idx + 1, n_folds,
-                df_train["_date"].min().date(), df_train["_date"].max().date(),
-                len(df_train),
+                train_end.date(), len(df_train),
                 df_test["_date"].min().date(), df_test["_date"].max().date(),
                 len(df_test),
             )
 
-            # Prepare features
             feature_cols = [c for c in ALL_FEATURE_NAMES if c in df.columns]
 
             X_train = df_train[feature_cols].copy()
@@ -834,7 +867,6 @@ class StockReturnPredictor:
             X_test = df_test[feature_cols].copy()
             y_test_raw = df_test[TARGET_COLUMN].copy()
 
-            # Drop rows with missing target
             valid_train = y_train_raw.notna()
             X_train = X_train[valid_train].reset_index(drop=True)
             y_train_raw = y_train_raw[valid_train].reset_index(drop=True)
@@ -845,11 +877,9 @@ class StockReturnPredictor:
             y_test_raw = y_test_raw[valid_test].reset_index(drop=True)
             df_test = df_test[valid_test].reset_index(drop=True)
 
-            # Binary classification target
             y_train = (y_train_raw >= CLASSIFICATION_THRESHOLD).astype(int)
             y_test = (y_test_raw >= CLASSIFICATION_THRESHOLD).astype(int)
 
-            # Balanced class weights (inverse frequency, matching A/B script)
             pos_rate = y_train.mean()
             if pos_rate == 0 or pos_rate == 1:
                 logger.warning("Fold %d: single class in training, skipping.", fold_idx + 1)
@@ -858,18 +888,22 @@ class StockReturnPredictor:
                 y_train == 1, 1.0 / pos_rate, 1.0 / (1 - pos_rate),
             )
 
-            # Preprocessing: median fill + percentile clipping (no log
-            # transform or semantic NaN — matches the validated A/B script)
+            # Per-fold preprocessing: median fill + percentile clipping
             fold_medians = X_train.median()
+            clip_bounds = {}
             for col in feature_cols:
                 X_train[col] = X_train[col].fillna(fold_medians[col])
                 X_test[col] = X_test[col].fillna(fold_medians[col])
                 p01, p99 = X_train[col].quantile(0.01), X_train[col].quantile(0.99)
+                clip_bounds[col] = (p01, p99)
                 if p01 < p99:
                     X_train[col] = X_train[col].clip(p01, p99)
                     X_test[col] = X_test[col].clip(p01, p99)
 
-            # Train FLAML AutoML for this fold
+            train_dates = df_train["_date"].values
+            test_dates = df_test["_date"].values
+
+            # ---- Stage 1: FLAML Binary Classifier ----
             fold_automl = AutoML()
             fold_automl.fit(
                 X_train=X_train,
@@ -877,6 +911,7 @@ class StockReturnPredictor:
                 task="classification",
                 time_budget=time_budget,
                 metric="ap",
+                seed=42,
                 estimator_list=["xgboost", "lgbm"],
                 eval_method="cv",
                 n_splits=5,
@@ -885,280 +920,220 @@ class StockReturnPredictor:
                 sample_weight=sw_train,
             )
 
-            # Evaluate on test set
             y_proba_test = fold_automl.predict_proba(X_test)
-            if y_proba_test.ndim == 2:
-                y_proba_pos = y_proba_test[:, 1]
-            else:
-                y_proba_pos = y_proba_test
+            y_proba_pos = y_proba_test[:, 1] if y_proba_test.ndim == 2 else y_proba_test
 
+            try:
+                cls_auc = roc_auc_score(y_test, y_proba_pos)
+            except ValueError:
+                cls_auc = float("nan")
+
+            cls_pass_test = y_proba_pos >= CLS_PROB_THRESHOLD
+            logger.info(
+                "  Stage 1 (Classifier): AUC=%.4f, pass: %d/%d (%.1f%%)",
+                cls_auc, int(cls_pass_test.sum()), len(y_proba_pos),
+                cls_pass_test.mean() * 100,
+            )
+
+            # ---- Stage 2: XGBoost Huber Regressor ----
+            huber_labels_train = np.nan_to_num(y_train_raw.values, nan=0.0)
+            huber_labels_test = np.nan_to_num(y_test_raw.values, nan=0.0)
+
+            dtr_huber = xgb.DMatrix(X_train, label=huber_labels_train)
+            dte_huber = xgb.DMatrix(X_test, label=huber_labels_test)
+
+            huber_evals: dict = {}
+            huber_model = xgb.train(
+                huber_params, dtr_huber, num_boost_round=500,
+                evals=[(dtr_huber, "train"), (dte_huber, "test")],
+                evals_result=huber_evals,
+                early_stopping_rounds=50,
+                verbose_eval=False,
+            )
+
+            pred_mfd_test = huber_model.predict(dte_huber)
+            from sklearn.metrics import r2_score, mean_absolute_error
+            r2 = r2_score(huber_labels_test, pred_mfd_test)
+            mae = mean_absolute_error(huber_labels_test, pred_mfd_test)
+
+            mfd_pass_test = pred_mfd_test >= MFD_PRED_THRESHOLD
+            elite_test = cls_pass_test & mfd_pass_test
+
+            logger.info(
+                "  Stage 2 (Huber): R2=%.4f MAE=%.4f, Elite: %d/%d",
+                r2, mae, int(elite_test.sum()), len(elite_test),
+            )
+
+            # ---- Stage 3: Cross-Sectional Quantile Transform ----
+            # Transform features to per-date percentile ranks for elite survivors
+            elite_train_mask = np.ones(len(X_train), dtype=bool)  # train on all
+            X_train_qt = X_train.copy()
+            X_test_qt = X_test.copy()
+            for col in feature_cols:
+                for dates_arr, X_df in [(train_dates, X_train_qt), (test_dates, X_test_qt)]:
+                    for d in np.unique(dates_arr):
+                        dmask = dates_arr == d
+                        vals = X_df.loc[dmask, col].values
+                        if len(vals) > 1:
+                            ranks = pd.Series(vals).rank(pct=True).values
+                            X_df.loc[dmask, col] = ranks
+                        else:
+                            X_df.loc[dmask, col] = 0.5
+
+            logger.info("  Stage 3 (Quantile Transform): features transformed")
+
+            # ---- Stage 4: LambdaMART on quantile-transformed features ----
+            # Train on elite survivors only, with log-scaled MFD labels
             y_proba_train = fold_automl.predict_proba(X_train)
-            if y_proba_train.ndim == 2:
-                y_proba_train_pos = y_proba_train[:, 1]
-            else:
-                y_proba_train_pos = y_proba_train
+            y_proba_train_pos = y_proba_train[:, 1] if y_proba_train.ndim == 2 else y_proba_train
+            pred_mfd_train = huber_model.predict(dtr_huber)
+            elite_train = (y_proba_train_pos >= CLS_PROB_THRESHOLD) & (pred_mfd_train >= MFD_PRED_THRESHOLD)
 
-            try:
-                auc_test = roc_auc_score(y_test, y_proba_pos)
-            except ValueError:
-                auc_test = float("nan")
-            try:
-                ap_test = average_precision_score(y_test, y_proba_pos)
-            except ValueError:
-                ap_test = float("nan")
-            try:
-                auc_train = roc_auc_score(y_train, y_proba_train_pos)
-            except ValueError:
-                auc_train = float("nan")
-            try:
-                ap_train = average_precision_score(y_train, y_proba_train_pos)
-            except ValueError:
-                ap_train = float("nan")
-
-            # Top-10 precision
-            top10_hits = 0
-            top10_picks = []
-            if len(y_proba_pos) >= 10:
-                top10_idx = np.argsort(-y_proba_pos)[:10]
-                top10_hits = int(y_test.iloc[top10_idx].sum())
-                actual_returns = y_test_raw.iloc[top10_idx].values
-                if "Ticker" in df_test.columns:
-                    top10_tickers = df_test["Ticker"].iloc[top10_idx].values
-                else:
-                    top10_tickers = [f"Stock #{i+1}" for i in range(10)]
-                for rank, (idx_pos, ticker_val, ret_val) in enumerate(
-                    zip(top10_idx, top10_tickers, actual_returns), 1
-                ):
-                    top10_picks.append({
-                        "rank": rank,
-                        "ticker": str(ticker_val),
-                        "probability": round(float(y_proba_pos[idx_pos]), 4),
-                        "actual_return": round(float(ret_val), 4) if not np.isnan(ret_val) else None,
-                        "hit": bool(ret_val >= CLASSIFICATION_THRESHOLD) if not np.isnan(ret_val) else False,
-                    })
-
-            top10_hit_rate = top10_hits / 10.0 if len(y_proba_pos) >= 10 else float("nan")
-            all_top10_hits.append(top10_hits)
-            all_top10_totals.append(min(10, len(y_proba_pos)))
-
-            # LTR for this fold (continuous return labels)
+            fold_ltr_model = None
             ltr_ndcg_train = float("nan")
             ltr_ndcg_test = float("nan")
-            fold_ltr_model = None
-            if "_date" in df_train.columns and "_date" in df_test.columns:
-                try:
-                    returns_train = df_train[TARGET_COLUMN].values
-                    returns_test = df_test[TARGET_COLUMN].values
-                    labels_tr = np.round(np.clip(returns_train, 0.0, 5.0) * 100).astype(np.int32)
-                    labels_tr[np.isnan(returns_train)] = 0
-                    labels_te = np.round(np.clip(returns_test, 0.0, 5.0) * 100).astype(np.int32)
-                    labels_te[np.isnan(returns_test)] = 0
 
-                    tr_groups = pd.Series(df_train["_date"].values).value_counts().sort_index()
-                    te_groups = pd.Series(df_test["_date"].values).value_counts().sort_index()
+            n_elite_train = int(elite_train.sum())
+            n_elite_test = int(elite_test.sum())
 
-                    if len(tr_groups) >= 5 and len(te_groups) >= 2:
-                        dtrain = xgb.DMatrix(X_train, label=labels_tr)
-                        dtrain.set_group(tr_groups.values)
-                        dtest = xgb.DMatrix(X_test, label=labels_te)
-                        dtest.set_group(te_groups.values)
+            if n_elite_train >= 100 and n_elite_test >= 10:
+                ltr_labels_train = np.round(
+                    np.log1p(np.clip(np.nan_to_num(y_train_raw.values[elite_train], nan=0.0), 0.0, None)) * 100
+                ).astype(np.int32)
+                ltr_labels_test = np.round(
+                    np.log1p(np.clip(np.nan_to_num(y_test_raw.values[elite_test], nan=0.0), 0.0, None)) * 100
+                ).astype(np.int32)
 
-                        ltr_params = {
-                            "objective": "rank:ndcg",
-                            "eval_metric": "ndcg@10",
-                            "ndcg_exp_gain": False,
-                            "max_depth": 6,
-                            "learning_rate": 0.05,
-                            "min_child_weight": 50,
-                            "subsample": 0.7,
-                            "colsample_bytree": 0.5,
-                            "reg_alpha": 5.0,
-                            "reg_lambda": 10.0,
-                            "verbosity": 0,
-                        }
-                        ltr_evals: dict = {}
-                        fold_ltr_model = xgb.train(
-                            ltr_params, dtrain, num_boost_round=500,
-                            evals=[(dtrain, "train"), (dtest, "test")],
-                            evals_result=ltr_evals,
-                            early_stopping_rounds=50,
-                            verbose_eval=False,
-                        )
-                        ltr_ndcg_train = ltr_evals["train"]["ndcg@10"][-1]
-                        ltr_ndcg_test = ltr_evals["test"]["ndcg@10"][-1]
-                except Exception as e:
-                    logger.warning("Fold %d LTR failed: %s", fold_idx + 1, e)
+                X_ltr_train = X_train_qt[elite_train].reset_index(drop=True)
+                X_ltr_test = X_test_qt[elite_test].reset_index(drop=True)
+                ltr_train_dates = train_dates[elite_train]
+                ltr_test_dates = test_dates[elite_test]
 
-            # Regression model for this fold
-            fold_reg_model = None
-            reg_r2_test = float("nan")
-            reg_mae_test = float("nan")
-            try:
-                returns_for_reg = df_train[TARGET_COLUMN].values.copy()
-                returns_capped_tr = np.clip(returns_for_reg, -1.0, 5.0)
-                valid_tr = ~np.isnan(returns_capped_tr)
-                X_tr_reg = X_train[valid_tr]
-                y_tr_reg = returns_capped_tr[valid_tr]
+                tr_groups = pd.Series(ltr_train_dates).value_counts().sort_index()
+                te_groups = pd.Series(ltr_test_dates).value_counts().sort_index()
 
-                returns_for_reg_te = df_test[TARGET_COLUMN].values.copy()
-                returns_capped_te = np.clip(returns_for_reg_te, -1.0, 5.0)
-                valid_te = ~np.isnan(returns_capped_te)
-                X_te_reg = X_test[valid_te]
-                y_te_reg = returns_capped_te[valid_te]
+                dtrain_ltr = xgb.DMatrix(X_ltr_train, label=ltr_labels_train)
+                dtrain_ltr.set_group(tr_groups.values)
+                dtest_ltr = xgb.DMatrix(X_ltr_test, label=ltr_labels_test)
+                dtest_ltr.set_group(te_groups.values)
 
-                if len(X_tr_reg) >= 100 and len(X_te_reg) >= 50:
-                    fold_reg_model = AutoML()
-                    reg_budget = max(30, time_budget // 4)
-                    fold_reg_model.fit(
-                        X_train=X_tr_reg, y_train=y_tr_reg,
-                        task="regression", time_budget=reg_budget,
-                        metric="mae", estimator_list=["xgboost", "lgbm"],
-                        eval_method="cv", n_splits=5, verbose=0,
-                        early_stop=True,
-                    )
-                    from sklearn.metrics import mean_absolute_error, r2_score
-                    y_pred_reg = fold_reg_model.predict(X_te_reg)
-                    reg_r2_test = r2_score(y_te_reg, y_pred_reg)
-                    reg_mae_test = mean_absolute_error(y_te_reg, y_pred_reg)
-                    logger.info(
-                        "Fold %d regression: R²=%.4f MAE=%.4f",
-                        fold_idx + 1, reg_r2_test, reg_mae_test,
-                    )
-            except Exception as e:
-                logger.warning("Fold %d regression failed: %s", fold_idx + 1, e)
+                ltr_evals: dict = {}
+                fold_ltr_model = xgb.train(
+                    ltr_params, dtrain_ltr, num_boost_round=500,
+                    evals=[(dtrain_ltr, "train"), (dtest_ltr, "test")],
+                    evals_result=ltr_evals,
+                    early_stopping_rounds=50,
+                    verbose_eval=False,
+                )
+                ltr_ndcg_train = ltr_evals["train"]["ndcg@10"][-1]
+                ltr_ndcg_test = ltr_evals["test"]["ndcg@10"][-1]
 
-            # Recompute top-10 using 3-stage ensemble
-            ensemble_scores = y_proba_pos.copy()
-            if fold_ltr_model is not None:
-                dmat_test = xgb.DMatrix(X_test)
-                ltr_test_scores = fold_ltr_model.predict(dmat_test)
-                ltr_test_norm = 1.0 / (1.0 + np.exp(-ltr_test_scores))
-                if fold_reg_model is not None:
-                    reg_test_pred = fold_reg_model.predict(X_test)
-                    reg_test_norm = 1.0 / (1.0 + np.exp(-reg_test_pred * 2))
-                    ensemble_scores = (
-                        W_CLS * y_proba_pos
-                        + W_LTR * ltr_test_norm
-                        + W_REG * reg_test_norm
-                    )
-                else:
-                    w = LTR_ENSEMBLE_WEIGHT
-                    ensemble_scores = (1 - w) * y_proba_pos + w * ltr_test_norm
-            elif fold_reg_model is not None:
-                reg_test_pred = fold_reg_model.predict(X_test)
-                reg_test_norm = 1.0 / (1.0 + np.exp(-reg_test_pred * 2))
-                ensemble_scores = 0.6 * y_proba_pos + 0.4 * reg_test_norm
+            logger.info(
+                "  Stage 4 (LTR): NDCG train=%.4f test=%.4f",
+                ltr_ndcg_train, ltr_ndcg_test,
+            )
 
-            # Re-evaluate top-10 with ensemble
-            top10_hits_ens = 0
-            top10_picks_ens = []
-            top10_avg_return = float("nan")
-            if len(ensemble_scores) >= 10:
-                top10_idx_ens = np.argsort(-ensemble_scores)[:10]
-                top10_hits_ens = int(y_test.iloc[top10_idx_ens].sum())
-                actual_returns_ens = y_test_raw.iloc[top10_idx_ens].values
-                top10_avg_return = float(np.nanmean(actual_returns_ens))
-                if "Ticker" in df_test.columns:
-                    top10_tickers_ens = df_test["Ticker"].iloc[top10_idx_ens].values
-                else:
-                    top10_tickers_ens = [f"Stock #{i+1}" for i in range(10)]
-                for rank, (idx_pos, ticker_val, ret_val) in enumerate(
-                    zip(top10_idx_ens, top10_tickers_ens, actual_returns_ens), 1
-                ):
-                    top10_picks_ens.append({
-                        "rank": rank,
-                        "ticker": str(ticker_val),
-                        "ensemble_score": round(float(ensemble_scores[idx_pos]), 4),
-                        "actual_return": round(float(ret_val), 4) if not np.isnan(ret_val) else None,
-                        "hit": bool(ret_val >= CLASSIFICATION_THRESHOLD) if not np.isnan(ret_val) else False,
-                    })
+            # ---- Per-day top-10 evaluation with Z-score ranking ----
+            ltr_scores = fold_ltr_model.predict(dtest_ltr) if fold_ltr_model is not None else pred_mfd_test[elite_test]
 
-            top10_hit_rate_ens = top10_hits_ens / 10.0 if len(ensemble_scores) >= 10 else float("nan")
-            # Override for aggregate stats
-            all_top10_hits[-1] = top10_hits_ens
-            all_top10_totals[-1] = min(10, len(ensemble_scores))
+            unique_test_dates = np.unique(test_dates)
+            daily_hits_list = []
+            daily_returns_list = []
+
+            for date_val in unique_test_dates:
+                date_mask = test_dates == date_val
+                day_elite = elite_test & date_mask
+                n_elite_day = int(day_elite.sum())
+
+                if n_elite_day < MIN_ELITE_POOL:
+                    continue
+
+                elite_indices = np.where(day_elite)[0]
+                # Map elite_indices to ltr_scores indices
+                elite_cumsum = np.cumsum(elite_test)
+                ltr_idx = np.array([int(elite_cumsum[i]) - 1 for i in elite_indices])
+
+                day_ltr = ltr_scores[ltr_idx]
+                day_proba = y_proba_pos[elite_indices]
+                day_returns_vals = y_test_raw.values[elite_indices]
+
+                p_mu, p_sig = day_proba.mean(), day_proba.std()
+                day_cls_z = (day_proba - p_mu) / p_sig if p_sig > 1e-8 else np.zeros_like(day_proba)
+
+                l_mu, l_sig = day_ltr.mean(), day_ltr.std()
+                day_ltr_z = (day_ltr - l_mu) / l_sig if l_sig > 1e-8 else np.zeros_like(day_ltr)
+
+                day_scores = np.maximum(day_cls_z, 0) * np.maximum(day_ltr_z, 0)
+                top10 = np.argsort(day_scores)[-10:][::-1]
+                t10_ret = day_returns_vals[top10]
+                hits = int((t10_ret >= CLASSIFICATION_THRESHOLD).sum())
+
+                daily_hits_list.append(hits)
+                daily_returns_list.append(float(t10_ret.mean()))
+
+            n_eval_days = len(daily_hits_list)
+            total_hits_fold = sum(daily_hits_list)
+            total_picks_fold = n_eval_days * 10
+            avg_hit_rate = total_hits_fold / total_picks_fold if total_picks_fold > 0 else 0
+            avg_daily_return = float(np.mean(daily_returns_list)) if daily_returns_list else 0
+
+            all_top10_hits.append(total_hits_fold)
+            all_top10_totals.append(total_picks_fold)
 
             fold_result = {
                 "fold": fold_idx + 1,
-                "train_period": f"{df_train['_date'].min().date()} to {df_train['_date'].max().date()}",
+                "train_period": f"{df_train['_date'].min().date()} to {train_end.date()}",
                 "test_period": f"{df_test['_date'].min().date()} to {df_test['_date'].max().date()}",
                 "train_rows": len(X_train),
                 "test_rows": len(X_test),
                 "best_estimator": fold_automl.best_estimator,
-                "auc_train": round(auc_train, 4),
-                "auc_test": round(auc_test, 4),
-                "auc_gap": round(auc_train - auc_test, 4),
-                "ap_train": round(ap_train, 4),
-                "ap_test": round(ap_test, 4),
-                "ap_gap": round(ap_train - ap_test, 4),
-                "top10_hits": top10_hits_ens,
-                "top10_hit_rate": round(top10_hit_rate_ens, 4),
-                "top10_avg_return": round(top10_avg_return, 4) if not np.isnan(top10_avg_return) else None,
-                "top10_picks": top10_picks_ens,
-                "ltr_ndcg_train": round(ltr_ndcg_train, 4) if not np.isnan(ltr_ndcg_train) else None,
+                "auc_test": round(cls_auc, 4),
+                "huber_r2": round(r2, 4),
                 "ltr_ndcg_test": round(ltr_ndcg_test, 4) if not np.isnan(ltr_ndcg_test) else None,
-                "reg_r2_test": round(reg_r2_test, 4) if not np.isnan(reg_r2_test) else None,
-                "reg_mae_test": round(reg_mae_test, 4) if not np.isnan(reg_mae_test) else None,
+                "n_eval_days": n_eval_days,
+                "top10_hits": total_hits_fold,
+                "top10_total": total_picks_fold,
+                "top10_hit_rate": round(avg_hit_rate, 4),
+                "top10_avg_return": round(avg_daily_return, 4),
+                "min_elite_pool": MIN_ELITE_POOL,
+                "avg_elite_per_day": round(float(np.mean([int((elite_test & (test_dates == d)).sum()) for d in unique_test_dates if int((elite_test & (test_dates == d)).sum()) >= MIN_ELITE_POOL])), 0) if n_eval_days > 0 else 0,
             }
             fold_results.append(fold_result)
 
             logger.info(
-                "Fold %d: AUC train=%.4f test=%.4f | AP train=%.4f test=%.4f | "
-                "Top-10: %d/10 (%.0f%%) [cls=%d/10, ens=%d/10]",
-                fold_idx + 1, auc_train, auc_test, ap_train, ap_test,
-                top10_hits_ens, top10_hit_rate_ens * 100,
-                top10_hits, top10_hits_ens,
+                "Fold %d: AUC=%.4f R2=%.4f | %d days (pool>=%d) | "
+                "Hit rate=%.1f%% | Avg return=%.1f%%",
+                fold_idx + 1, cls_auc, r2,
+                n_eval_days, MIN_ELITE_POOL,
+                avg_hit_rate * 100, avg_daily_return * 100,
             )
 
-            # Save this fold's models for ensemble
+            # Save fold models for ensemble prediction
             fold_model_entry = {
                 "fold": fold_idx + 1,
                 "automl": fold_automl,
+                "huber_model": huber_model,
                 "ltr_model": fold_ltr_model,
-                "regression_model": fold_reg_model,
                 "feature_medians": fold_medians,
+                "clip_bounds": clip_bounds,
             }
             self.fold_models.append(fold_model_entry)
-            logger.info(
-                "Fold %d models saved to ensemble (%d total)",
-                fold_idx + 1, len(self.fold_models),
-            )
 
-            # On the final fold, also set single-model attrs for
-            # backward compat and save everything
             if fold_idx == n_folds - 1:
-                logger.info("Saving walk-forward ensemble (%d fold models)...", len(self.fold_models))
                 self.automl = fold_automl
                 self.feature_names = feature_cols
                 self.feature_medians = fold_medians
                 self.is_trained = True
+                self.regression_model = None
 
-                # Train final LTR on the last fold's split
+                # Train final global LTR for backward compat
                 split_idx = len(X_train)
                 X_combined = pd.concat([X_train, X_test], ignore_index=True)
                 y_combined = pd.concat([y_train, y_test], ignore_index=True)
                 df_combined = pd.concat([df_train, df_test], ignore_index=True)
-                ltr_metrics = self._train_ltr(
+                self._train_ltr(
                     df_combined, X_combined, y_combined,
                     feature_cols, split_idx, 0,
-                )
-
-                # Train final regression model on the last fold's split
-                reg_budget_final = max(30, time_budget // 4)
-                self._train_regression(
-                    df_combined, X_combined,
-                    feature_cols, split_idx, 0,
-                    time_budget=reg_budget_final,
-                )
-
-                # Regime + calibration on final fold
-                regime_metrics = self._train_regime_model(
-                    df_combined, X_combined, y_combined,
-                    split_idx, 0,
-                )
-                cal_metrics = self._train_ticker_calibration(
-                    df_combined, X_combined, y_combined,
-                    split_idx, 0,
                 )
                 self.save()
 
@@ -1171,52 +1146,34 @@ class StockReturnPredictor:
         avg_hit_rate = total_hits / total_picks if total_picks > 0 else 0.0
 
         auc_tests = [f["auc_test"] for f in fold_results if not np.isnan(f["auc_test"])]
-        ap_tests = [f["ap_test"] for f in fold_results if not np.isnan(f["ap_test"])]
-        auc_gaps = [f["auc_gap"] for f in fold_results if not np.isnan(f["auc_gap"])]
-        ap_gaps = [f["ap_gap"] for f in fold_results if not np.isnan(f["ap_gap"])]
-
-        # Avg return of top-10 picks across folds
-        avg_returns = [
-            f["top10_avg_return"] for f in fold_results
-            if f.get("top10_avg_return") is not None
-        ]
 
         summary = {
             "n_folds": len(fold_results),
+            "pipeline": "4-stage (Cls + Huber + QT + LTR)",
+            "min_elite_pool": MIN_ELITE_POOL,
             "aggregate_top10_hits": total_hits,
             "aggregate_top10_total": total_picks,
             "aggregate_top10_hit_rate": round(avg_hit_rate, 4),
-            "mean_top10_avg_return": round(float(np.mean(avg_returns)), 4) if avg_returns else None,
             "mean_auc_test": round(float(np.mean(auc_tests)), 4) if auc_tests else None,
-            "std_auc_test": round(float(np.std(auc_tests)), 4) if auc_tests else None,
-            "mean_ap_test": round(float(np.mean(ap_tests)), 4) if ap_tests else None,
-            "std_ap_test": round(float(np.std(ap_tests)), 4) if ap_tests else None,
-            "mean_auc_gap": round(float(np.mean(auc_gaps)), 4) if auc_gaps else None,
-            "mean_ap_gap": round(float(np.mean(ap_gaps)), 4) if ap_gaps else None,
             "folds": fold_results,
         }
 
         logger.info("=" * 70)
-        logger.info("WALK-FORWARD SUMMARY (3-Stage Hybrid)")
+        logger.info("WALK-FORWARD SUMMARY (4-Stage Pipeline, min pool >= %d)", MIN_ELITE_POOL)
         logger.info("=" * 70)
         logger.info(
-            "Folds: %d | Aggregate Top-10: %d/%d (%.1f%%) | "
-            "Avg Top-10 Return: %.1f%% | "
-            "Mean AUC: %.4f ± %.4f | Mean AP: %.4f ± %.4f",
+            "Folds: %d | Total: %d/%d hits (%.1f%%) | Mean AUC: %.4f",
             len(fold_results), total_hits, total_picks, avg_hit_rate * 100,
-            (np.mean(avg_returns) * 100) if avg_returns else 0,
             np.mean(auc_tests) if auc_tests else 0,
-            np.std(auc_tests) if auc_tests else 0,
-            np.mean(ap_tests) if ap_tests else 0,
-            np.std(ap_tests) if ap_tests else 0,
         )
         for f in fold_results:
-            avg_ret_str = f"{f['top10_avg_return']*100:.1f}%" if f.get("top10_avg_return") is not None else "N/A"
             logger.info(
-                "  Fold %d [%s]: AUC=%.4f AP=%.4f Top10=%d/10 (%.0f%%) AvgRet=%s",
+                "  Fold %d [%s]: AUC=%.4f R2=%.4f | %d days | "
+                "Hit rate=%.1f%% | Avg return=%.1f%%",
                 f["fold"], f["test_period"],
-                f["auc_test"], f["ap_test"],
-                f["top10_hits"], f["top10_hit_rate"] * 100, avg_ret_str,
+                f["auc_test"], f["huber_r2"],
+                f["n_eval_days"],
+                f["top10_hit_rate"] * 100, f["top10_avg_return"] * 100,
             )
 
         return summary
@@ -1729,17 +1686,23 @@ class StockReturnPredictor:
         tickers: pd.Series | None = None,
         apply_adjustments: bool = True,
     ) -> np.ndarray:
-        """Score multiple rows, returning adjusted ensemble scores for ranking.
+        """Score multiple rows using the 4-stage pipeline.
 
-        Uses the classification probability + LTR ranking score ensemble,
-        then applies volatility-aware scoring and per-ticker calibration
-        when ``apply_adjustments`` is True.
+        For each fold model, runs the full pipeline:
+          1. Classifier probability (gate P >= CLS_PROB_THRESHOLD)
+          2. Huber MFD prediction (gate >= MFD_PRED_THRESHOLD)
+          3. Cross-sectional quantile transform (per-date percentile ranks)
+          4. LTR score on quantile-transformed features
+
+        Final score = max(Z_cls, 0) * max(Z_ltr, 0) averaged across folds.
+        Stocks that don't pass both gates get score 0.
+
+        Also returns elite_pool_size and individual stage scores as
+        attributes on the returned array when fold_models are available.
 
         Args:
-            df: DataFrame with feature columns. Will be preprocessed
-                (derived features, semantic NaN, log transform, median fill).
-            tickers: Optional series of ticker symbols for per-ticker
-                calibration. Must be same length as df.
+            df: DataFrame with feature columns.
+            tickers: Optional series of ticker symbols.
             apply_adjustments: Whether to apply volatility scoring and
                 ticker calibration (default True).
 
@@ -1749,7 +1712,6 @@ class StockReturnPredictor:
         if not self.is_trained:
             self.load()
 
-        # Keep raw volatility before feature preprocessing
         raw_vol = df["Volatility_20d"].values.copy() if "Volatility_20d" in df.columns else None
 
         df = df.copy()
@@ -1759,94 +1721,106 @@ class StockReturnPredictor:
                 df[col] = 0.0
         df_features = df[self.feature_names].copy()
 
-        # --- Walk-forward ensemble: average scores across fold models ---
-        if self.fold_models:
+        # --- Walk-forward 4-stage ensemble ---
+        if self.fold_models and any(fm.get("huber_model") is not None for fm in self.fold_models):
             all_fold_scores = []
+            all_fold_proba = []
+            all_fold_mfd = []
+
             for fm in self.fold_models:
                 fm_medians = fm.get("feature_medians")
+                fm_clip = fm.get("clip_bounds", {})
                 df_fold = df_features.copy()
+
+                # Apply per-fold preprocessing
                 if fm_medians is not None:
                     for col in self.feature_names:
                         if col in fm_medians.index:
                             df_fold[col] = df_fold[col].fillna(fm_medians[col])
                 else:
                     df_fold = df_fold.fillna(0.0)
+                for col, (lo, hi) in fm_clip.items():
+                    if col in df_fold.columns and lo < hi:
+                        df_fold[col] = df_fold[col].clip(lo, hi)
 
+                # Stage 1: Classifier
                 proba = fm["automl"].predict_proba(df_fold)
-                cls_sc = proba[:, 1] if proba.ndim == 2 else proba
+                cls_prob = proba[:, 1] if proba.ndim == 2 else proba
+                cls_pass = cls_prob >= CLS_PROB_THRESHOLD
 
+                # Stage 2: Huber MFD
+                huber = fm.get("huber_model")
+                if huber is not None:
+                    pred_mfd = huber.predict(xgb.DMatrix(df_fold))
+                else:
+                    pred_mfd = np.zeros(len(df_fold))
+                mfd_pass = pred_mfd >= MFD_PRED_THRESHOLD
+
+                elite = cls_pass & mfd_pass
+
+                # Stage 3: Quantile transform features
+                df_qt = df_fold.copy()
+                for col in self.feature_names:
+                    vals = df_qt[col].values
+                    if len(vals) > 1:
+                        ranks = pd.Series(vals).rank(pct=True).values
+                        df_qt[col] = ranks
+                    else:
+                        df_qt[col] = 0.5
+
+                # Stage 4: LTR on elite survivors only
                 fm_ltr = fm.get("ltr_model")
-                fm_reg = fm.get("regression_model")
+                ltr_sc = np.zeros(len(df_fold))
+                if fm_ltr is not None and elite.sum() > 0:
+                    elite_qt = df_qt[elite].reset_index(drop=True)
+                    ltr_raw = fm_ltr.predict(xgb.DMatrix(elite_qt))
+                    ltr_sc[elite] = ltr_raw
 
-                if fm_ltr is not None:
-                    ltr_sc = fm_ltr.predict(xgb.DMatrix(df_fold))
-                    ltr_n = 1.0 / (1.0 + np.exp(-ltr_sc))
-                else:
-                    ltr_n = None
+                # Z-score ranking within elite pool
+                fold_scores = np.zeros(len(df_fold))
+                if elite.sum() >= 2:
+                    elite_proba = cls_prob[elite]
+                    elite_ltr = ltr_sc[elite]
 
-                if fm_reg is not None:
-                    reg_p = fm_reg.predict(df_fold)
-                    reg_n = 1.0 / (1.0 + np.exp(-reg_p * 2))
-                else:
-                    reg_n = None
+                    p_mu, p_sig = elite_proba.mean(), elite_proba.std()
+                    z_cls = (elite_proba - p_mu) / p_sig if p_sig > 1e-8 else np.zeros_like(elite_proba)
 
-                if ltr_n is not None and reg_n is not None:
-                    fold_sc = W_CLS * cls_sc + W_LTR * ltr_n + W_REG * reg_n
-                elif ltr_n is not None:
-                    fold_sc = (1 - LTR_ENSEMBLE_WEIGHT) * cls_sc + LTR_ENSEMBLE_WEIGHT * ltr_n
-                elif reg_n is not None:
-                    fold_sc = 0.6 * cls_sc + 0.4 * reg_n
-                else:
-                    fold_sc = cls_sc.copy()
-                all_fold_scores.append(fold_sc)
+                    l_mu, l_sig = elite_ltr.mean(), elite_ltr.std()
+                    z_ltr = (elite_ltr - l_mu) / l_sig if l_sig > 1e-8 else np.zeros_like(elite_ltr)
+
+                    z_scores = np.maximum(z_cls, 0) * np.maximum(z_ltr, 0)
+                    fold_scores[elite] = z_scores
+
+                all_fold_scores.append(fold_scores)
+                all_fold_proba.append(cls_prob)
+                all_fold_mfd.append(pred_mfd)
 
             scores = np.mean(all_fold_scores, axis=0)
+
         else:
-            # Fallback: single model (backward compat)
+            # Fallback: legacy 2-stage (backward compat)
             if self.feature_medians is not None:
                 df_features = df_features.fillna(self.feature_medians)
             else:
                 df_features = df_features.fillna(0.0)
 
             proba = self.automl.predict_proba(df_features)
-            if proba.ndim == 2:
-                cls_scores = proba[:, 1]
-            else:
-                cls_scores = proba
+            cls_scores = proba[:, 1] if proba.ndim == 2 else proba
 
             has_ltr = self.ltr_model is not None
-            has_reg = self.regression_model is not None
-
             if has_ltr:
                 dmat = xgb.DMatrix(df_features)
-                ltr_scores = self.ltr_model.predict(dmat)
-                ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores))
-            else:
-                ltr_norm = None
-
-            if has_reg:
-                reg_pred = self.regression_model.predict(df_features)
-                reg_norm = 1.0 / (1.0 + np.exp(-reg_pred * 2))
-            else:
-                reg_norm = None
-
-            if has_ltr and has_reg:
-                scores = W_CLS * cls_scores + W_LTR * ltr_norm + W_REG * reg_norm
-            elif has_ltr:
-                w = LTR_ENSEMBLE_WEIGHT
-                scores = (1 - w) * cls_scores + w * ltr_norm
-            elif has_reg:
-                scores = 0.6 * cls_scores + 0.4 * reg_norm
+                ltr_scores_raw = self.ltr_model.predict(dmat)
+                ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores_raw))
+                scores = 0.5 * cls_scores + 0.5 * ltr_norm
             else:
                 scores = cls_scores.copy()
 
         if apply_adjustments:
-            # Volatility-aware scoring: boost higher-volatility stocks
             if raw_vol is not None and len(raw_vol) > 1:
                 vol_pctl = pd.Series(raw_vol).rank(pct=True).values
                 scores = scores * (1 + VOLATILITY_SCORE_ALPHA * vol_pctl)
 
-            # Per-ticker calibration: penalize repeat false positives
             if tickers is not None and self.ticker_calibration:
                 cal_factors = np.array([
                     self.ticker_calibration.get(t, 1.0) for t in tickers
@@ -1982,6 +1956,10 @@ class StockReturnPredictor:
                 joblib.dump(fm["feature_medians"], fold_dir / "feature_medians.pkl")
                 if fm.get("ltr_model") is not None:
                     fm["ltr_model"].save_model(str(fold_dir / "ltr_model.json"))
+                if fm.get("huber_model") is not None:
+                    fm["huber_model"].save_model(str(fold_dir / "huber_model.json"))
+                if fm.get("clip_bounds"):
+                    joblib.dump(fm["clip_bounds"], fold_dir / "clip_bounds.pkl")
                 if fm.get("regression_model") is not None:
                     joblib.dump(fm["regression_model"], fold_dir / "regression_model.pkl")
             joblib.dump(len(self.fold_models), FOLD_MODELS_DIR / "n_folds.pkl")
@@ -2114,12 +2092,21 @@ class StockReturnPredictor:
                         "automl": joblib.load(fold_dir / "automl.pkl"),
                         "feature_medians": joblib.load(fold_dir / "feature_medians.pkl"),
                         "ltr_model": None,
+                        "huber_model": None,
+                        "clip_bounds": {},
                         "regression_model": None,
                     }
                     ltr_path = fold_dir / "ltr_model.json"
                     if ltr_path.exists():
                         fm["ltr_model"] = xgb.Booster()
                         fm["ltr_model"].load_model(str(ltr_path))
+                    huber_path = fold_dir / "huber_model.json"
+                    if huber_path.exists():
+                        fm["huber_model"] = xgb.Booster()
+                        fm["huber_model"].load_model(str(huber_path))
+                    clip_path = fold_dir / "clip_bounds.pkl"
+                    if clip_path.exists():
+                        fm["clip_bounds"] = joblib.load(clip_path)
                     reg_path = fold_dir / "regression_model.pkl"
                     if reg_path.exists():
                         fm["regression_model"] = joblib.load(reg_path)

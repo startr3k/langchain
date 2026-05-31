@@ -322,6 +322,10 @@ def _batch_score_from_cache(
         apply_adjustments=True,
     )
 
+    # Compute elite pool size (stocks with non-zero score = passed both gates)
+    elite_pool_size = int((scores > 0).sum())
+    logger.info("Elite pool size: %d / %d tickers", elite_pool_size, len(scores))
+
     # Build results with scores
     scored = pd.DataFrame({
         "ticker": tickers,
@@ -426,6 +430,7 @@ def _batch_score_from_cache(
             "probability_gain": round(float(row["ensemble_score"]), 4),
             "signal": "BUY",
             "ensemble_score": float(row["ensemble_score"]),
+            "elite_pool_size": elite_pool_size,
             "ltr_score": 0.0,
             "classification_score": 0.0,
             "volume_surge_3d": round(float(row.get("Volume_Surge_3d", 0)), 2) if pd.notna(row.get("Volume_Surge_3d")) else None,
