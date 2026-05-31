@@ -113,8 +113,8 @@ page = st.sidebar.radio(
 if page == "Top Recommendations":
     st.title("Top Stock Recommendations")
     st.markdown(
-        "Shows the **top daily stock picks** from the full eligible universe "
-        "(Dow + S&P 500 + NASDAQ, ≥$1B market cap).  Loads instantly from the "
+        "Shows the **top daily stock picks** from the 616 NASDAQ-only ticker universe "
+        "(≥$100M market cap).  Loads instantly from the "
         "daily picks pipeline if it has already run today.  "
         "🔥 = also trending on social media."
     )
@@ -214,8 +214,8 @@ if page == "Top Recommendations":
                 pass
 
         with st.spinner(
-            "Re-running daily picks pipeline on full eligible universe "
-            "(Dow + S&P 500 + NASDAQ, ≥$1B)..."
+            "Re-running daily picks pipeline on 616 NASDAQ-only universe "
+            "(≥$100M market cap)..."
         ):
             try:
                 new_picks = run_daily_picks(
@@ -1415,8 +1415,8 @@ elif page == "Batch Predictions":
 elif page == "Social Media Listener":
     st.title("🔥 Social Media Listener")
     st.markdown(
-        "Top 20 hottest stocks — filtered to **Dow, S&P 500, "
-        "and NASDAQ** listed stocks with **≥ $1B market cap** only.  "
+        "Top 20 hottest stocks — filtered to **616 NASDAQ-only** "
+        "listed stocks with **≥ $100M market cap** only.  "
         "Data sourced from Reddit, Yahoo Finance (trending, most active, day movers), "
         "Finviz news headlines, and GDELT global news."
     )
@@ -1428,11 +1428,11 @@ elif page == "Social Media Listener":
             eligible = get_eligible_tickers()
             if cache_info["cached"]:
                 st.write(
-                    f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 "
-                    f"with ≥$1B market cap (cached {cache_info['age_hours']}h ago)"
+                    f"**{len(eligible)}** NASDAQ tickers "
+                    f"with ≥$100M market cap (cached {cache_info['age_hours']}h ago)"
                 )
             else:
-                st.write(f"**{len(eligible)}** tickers from Dow, S&P 500, and NASDAQ-100 with ≥$1B market cap")
+                st.write(f"**{len(eligible)}** NASDAQ tickers with ≥$100M market cap")
         with col_u2:
             if st.button("🔄 Refresh Tickers", key="refresh_tickers"):
                 with st.spinner("Fetching tickers from Wikipedia + yFinance..."):
