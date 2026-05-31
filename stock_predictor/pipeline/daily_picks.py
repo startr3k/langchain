@@ -92,7 +92,7 @@ def run_daily_picks(
     predictor.load()
 
     # ── Fast batch scoring using cached training data ─────────────────
-    # Load the latest row per ticker from the training CSV (all 617
+    # Load the latest row per ticker from the training CSV (all 670
     # tickers, pre-computed features) and score them in a single batch.
     # Only falls back to slow per-ticker yFinance fetching if the cache
     # is missing or stale (>7 days old).
@@ -276,7 +276,7 @@ def _batch_score_from_cache(
 
     Steps:
     1. Load the latest row per ticker from training_data_10y_full.csv.
-    2. Run ``predict_batch`` on the whole DataFrame (~617 rows).
+    2. Run ``predict_batch`` on the whole DataFrame (~670 rows).
     3. Rank by ensemble score and return the top-K results.
 
     Falls back to the slow per-ticker loop if the cache is missing.
@@ -340,7 +340,7 @@ def _batch_score_from_cache(
     from stock_predictor.pipeline.social_listener import get_eligible_tickers
 
     # Use the cached eligible ticker universe (Dow/S&P/NASDAQ >= $1B)
-    # instead of querying yfinance for all 617 tickers each run.
+    # instead of querying yfinance for all 670 tickers each run.
     eligible_set = get_eligible_tickers()
     all_tickers = scored["ticker"].tolist()
     logger.info(
