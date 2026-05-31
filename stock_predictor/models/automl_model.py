@@ -1844,7 +1844,7 @@ class StockReturnPredictor:
             }
 
         else:
-            # Fallback: legacy 2-stage (backward compat)
+            # Fallback: legacy ensemble (backward compat with train()-based models)
             if self.feature_medians is not None:
                 df_features = df_features.fillna(self.feature_medians)
             else:
@@ -1854,11 +1854,25 @@ class StockReturnPredictor:
             cls_scores = proba[:, 1] if proba.ndim == 2 else proba
 
             has_ltr = self.ltr_model is not None
-            if has_ltr:
+            has_reg = self.regression_model is not None
+
+            if has_ltr and has_reg:
                 dmat = xgb.DMatrix(df_features)
                 ltr_scores_raw = self.ltr_model.predict(dmat)
                 ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores_raw))
-                scores = 0.5 * cls_scores + 0.5 * ltr_norm
+                reg_pred = self.regression_model.predict(df_features)
+                reg_norm = 1.0 / (1.0 + np.exp(-reg_pred * 2))
+                scores = W_CLS * cls_scores + W_LTR * ltr_norm + W_REG * reg_norm
+            elif has_ltr:
+                dmat = xgb.DMatrix(df_features)
+                ltr_scores_raw = self.ltr_model.predict(dmat)
+                ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores_raw))
+                w = LTR_ENSEMBLE_WEIGHT
+                scores = (1 - w) * cls_scores + w * ltr_norm
+            elif has_reg:
+                reg_pred = self.regression_model.predict(df_features)
+                reg_norm = 1.0 / (1.0 + np.exp(-reg_pred * 2))
+                scores = 0.6 * cls_scores + 0.4 * reg_norm
             else:
                 scores = cls_scores.copy()
 
