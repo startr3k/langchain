@@ -771,6 +771,37 @@ class StockReturnPredictor:
         df["_date"] = pd.to_datetime(df["_date"])
         df = df.sort_values("_date").reset_index(drop=True)
 
+        # --- Quality filter: keep only stocks with revenue and earnings ---
+        before_filter = len(df)
+        if "Ticker" in df.columns and before_filter >= 500:
+            ticker_counts = df.groupby("Ticker").size()
+            tickers_2q = set(ticker_counts[ticker_counts >= 126].index)
+
+            if "hist_total_revenue" in df.columns:
+                has_rev = df.groupby("Ticker")["hist_total_revenue"].apply(
+                    lambda x: (x.notna() & (x > 0)).mean() > 0.5,
+                )
+                tickers_with_rev = set(has_rev[has_rev].index)
+            else:
+                tickers_with_rev = tickers_2q
+
+            if "earnings_eps_actual" in df.columns:
+                has_earn = df.groupby("Ticker")["earnings_eps_actual"].apply(
+                    lambda x: x.notna().mean() > 0.5,
+                )
+                tickers_with_earn = set(has_earn[has_earn].index)
+            else:
+                tickers_with_earn = tickers_2q
+
+            quality_tickers = tickers_2q & tickers_with_rev & tickers_with_earn
+            df = df[df["Ticker"].isin(quality_tickers)].reset_index(drop=True)
+            logger.info(
+                "Quality filter: %d → %d rows (%d tickers kept, %d removed)",
+                before_filter, len(df),
+                len(quality_tickers),
+                before_filter - len(df),
+            )
+
         # Compute derived interaction features
         df = _compute_derived_features(df)
 
