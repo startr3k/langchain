@@ -214,6 +214,7 @@ LTR_MODEL_PATH = MODEL_DIR / "ltr_model.json"
 REGIME_MODEL_PATH = MODEL_DIR / "regime_model.pkl"
 TICKER_CALIBRATION_PATH = MODEL_DIR / "ticker_calibration.pkl"
 REGRESSION_MODEL_PATH = MODEL_DIR / "regression_model.pkl"
+FOLD_MODELS_DIR = MODEL_DIR / "fold_models"
 _MODEL_META_PATH = MODEL_DIR / "model_meta.json"
 
 # Ensemble weights for 3-stage scoring:
@@ -264,6 +265,8 @@ class StockReturnPredictor:
         self.ltr_model: xgb.Booster | None = None
         self.regime_model: Optional[object] = None
         self.ticker_calibration: dict[str, float] = {}
+        # Walk-forward ensemble: list of per-fold model dicts
+        self.fold_models: list[dict] = []
 
     def train(
         self,
@@ -846,48 +849,28 @@ class StockReturnPredictor:
             y_train = (y_train_raw >= CLASSIFICATION_THRESHOLD).astype(int)
             y_test = (y_test_raw >= CLASSIFICATION_THRESHOLD).astype(int)
 
-            # Balanced class weights
-            n_pos = int(y_train.sum())
-            n_neg = len(y_train) - n_pos
-            if n_pos == 0 or n_neg == 0:
+            # Balanced class weights (inverse frequency, matching A/B script)
+            pos_rate = y_train.mean()
+            if pos_rate == 0 or pos_rate == 1:
                 logger.warning("Fold %d: single class in training, skipping.", fold_idx + 1)
                 continue
-            weight_neg = len(y_train) / (2.0 * n_neg)
-            weight_pos = len(y_train) / (2.0 * n_pos)
-            sw_train = y_train.map({0: weight_neg, 1: weight_pos}).values
+            sw_train = np.where(
+                y_train == 1, 1.0 / pos_rate, 1.0 / (1 - pos_rate),
+            )
 
-            # Fill NaN
-            X_train = _fill_semantic_nan(X_train)
-            X_test = _fill_semantic_nan(X_test)
-            X_train = _log_transform(X_train)
-            X_test = _log_transform(X_test)
+            # Preprocessing: median fill + percentile clipping (no log
+            # transform or semantic NaN — matches the validated A/B script)
             fold_medians = X_train.median()
-            X_train = X_train.fillna(fold_medians)
-            X_test = X_test.fillna(fold_medians)
+            for col in feature_cols:
+                X_train[col] = X_train[col].fillna(fold_medians[col])
+                X_test[col] = X_test[col].fillna(fold_medians[col])
+                p01, p99 = X_train[col].quantile(0.01), X_train[col].quantile(0.99)
+                if p01 < p99:
+                    X_train[col] = X_train[col].clip(p01, p99)
+                    X_test[col] = X_test[col].clip(p01, p99)
 
             # Train FLAML AutoML for this fold
             fold_automl = AutoML()
-            custom_hp = {
-                "xgboost": {
-                    "max_depth": {"domain": tune.randint(3, 9), "init_value": 5},
-                    "min_child_weight": {"domain": tune.randint(10, 101), "init_value": 30},
-                    "learning_rate": {"domain": tune.loguniform(0.01, 0.1), "init_value": 0.05},
-                    "subsample": {"domain": tune.uniform(0.5, 0.9), "init_value": 0.7},
-                    "colsample_bytree": {"domain": tune.uniform(0.3, 0.8), "init_value": 0.5},
-                    "reg_alpha": {"domain": tune.loguniform(0.01, 10.0), "init_value": 1.0},
-                    "reg_lambda": {"domain": tune.loguniform(1.0, 50.0), "init_value": 10.0},
-                },
-                "lgbm": {
-                    "max_depth": {"domain": tune.randint(3, 9), "init_value": 5},
-                    "min_child_samples": {"domain": tune.randint(50, 501), "init_value": 100},
-                    "learning_rate": {"domain": tune.loguniform(0.01, 0.1), "init_value": 0.05},
-                    "subsample": {"domain": tune.uniform(0.5, 0.9), "init_value": 0.7},
-                    "colsample_bytree": {"domain": tune.uniform(0.3, 0.8), "init_value": 0.5},
-                    "reg_alpha": {"domain": tune.loguniform(0.01, 10.0), "init_value": 1.0},
-                    "reg_lambda": {"domain": tune.loguniform(1.0, 50.0), "init_value": 10.0},
-                },
-            }
-
             fold_automl.fit(
                 X_train=X_train,
                 y_train=y_train,
@@ -898,7 +881,6 @@ class StockReturnPredictor:
                 eval_method="cv",
                 n_splits=5,
                 verbose=0,
-                custom_hp=custom_hp,
                 early_stop=True,
                 sample_weight=sw_train,
             )
@@ -1122,14 +1104,30 @@ class StockReturnPredictor:
 
             logger.info(
                 "Fold %d: AUC train=%.4f test=%.4f | AP train=%.4f test=%.4f | "
-                "Top-10: %d/10 (%.0f%%)",
+                "Top-10: %d/10 (%.0f%%) [cls=%d/10, ens=%d/10]",
                 fold_idx + 1, auc_train, auc_test, ap_train, ap_test,
-                top10_hits, top10_hit_rate * 100,
+                top10_hits_ens, top10_hit_rate_ens * 100,
+                top10_hits, top10_hits_ens,
             )
 
-            # Save the final fold's model as production
+            # Save this fold's models for ensemble
+            fold_model_entry = {
+                "fold": fold_idx + 1,
+                "automl": fold_automl,
+                "ltr_model": fold_ltr_model,
+                "regression_model": fold_reg_model,
+                "feature_medians": fold_medians,
+            }
+            self.fold_models.append(fold_model_entry)
+            logger.info(
+                "Fold %d models saved to ensemble (%d total)",
+                fold_idx + 1, len(self.fold_models),
+            )
+
+            # On the final fold, also set single-model attrs for
+            # backward compat and save everything
             if fold_idx == n_folds - 1:
-                logger.info("Saving final fold model as production model...")
+                logger.info("Saving walk-forward ensemble (%d fold models)...", len(self.fold_models))
                 self.automl = fold_automl
                 self.feature_names = feature_cols
                 self.feature_medians = fold_medians
@@ -1163,6 +1161,9 @@ class StockReturnPredictor:
                     split_idx, 0,
                 )
                 self.save()
+
+            import gc
+            gc.collect()
 
         # Aggregate statistics
         total_hits = sum(all_top10_hits)
@@ -1756,47 +1757,88 @@ class StockReturnPredictor:
         for col in self.feature_names:
             if col not in df.columns:
                 df[col] = 0.0
-        df = df[self.feature_names]
-        df = _fill_semantic_nan(df)
-        df = _log_transform(df)
-        if self.feature_medians is not None:
-            df = df.fillna(self.feature_medians)
-        else:
-            df = df.fillna(0.0)
+        df_features = df[self.feature_names].copy()
 
-        proba = self.automl.predict_proba(df)
-        if proba.ndim == 2:
-            cls_scores = proba[:, 1]
-        else:
-            cls_scores = proba
+        # --- Walk-forward ensemble: average scores across fold models ---
+        if self.fold_models:
+            all_fold_scores = []
+            for fm in self.fold_models:
+                fm_medians = fm.get("feature_medians")
+                df_fold = df_features.copy()
+                if fm_medians is not None:
+                    for col in self.feature_names:
+                        if col in fm_medians.index:
+                            df_fold[col] = df_fold[col].fillna(fm_medians[col])
+                else:
+                    df_fold = df_fold.fillna(0.0)
 
-        # 3-stage ensemble: classification + LTR + regression
-        has_ltr = self.ltr_model is not None
-        has_reg = self.regression_model is not None
+                proba = fm["automl"].predict_proba(df_fold)
+                cls_sc = proba[:, 1] if proba.ndim == 2 else proba
 
-        if has_ltr:
-            dmat = xgb.DMatrix(df)
-            ltr_scores = self.ltr_model.predict(dmat)
-            ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores))
-        else:
-            ltr_norm = None
+                fm_ltr = fm.get("ltr_model")
+                fm_reg = fm.get("regression_model")
 
-        if has_reg:
-            reg_pred = self.regression_model.predict(df)
-            # Normalize regression predictions to [0, 1] via sigmoid
-            reg_norm = 1.0 / (1.0 + np.exp(-reg_pred * 2))
-        else:
-            reg_norm = None
+                if fm_ltr is not None:
+                    ltr_sc = fm_ltr.predict(xgb.DMatrix(df_fold))
+                    ltr_n = 1.0 / (1.0 + np.exp(-ltr_sc))
+                else:
+                    ltr_n = None
 
-        if has_ltr and has_reg:
-            scores = W_CLS * cls_scores + W_LTR * ltr_norm + W_REG * reg_norm
-        elif has_ltr:
-            w = LTR_ENSEMBLE_WEIGHT
-            scores = (1 - w) * cls_scores + w * ltr_norm
-        elif has_reg:
-            scores = 0.6 * cls_scores + 0.4 * reg_norm
+                if fm_reg is not None:
+                    reg_p = fm_reg.predict(df_fold)
+                    reg_n = 1.0 / (1.0 + np.exp(-reg_p * 2))
+                else:
+                    reg_n = None
+
+                if ltr_n is not None and reg_n is not None:
+                    fold_sc = W_CLS * cls_sc + W_LTR * ltr_n + W_REG * reg_n
+                elif ltr_n is not None:
+                    fold_sc = (1 - LTR_ENSEMBLE_WEIGHT) * cls_sc + LTR_ENSEMBLE_WEIGHT * ltr_n
+                elif reg_n is not None:
+                    fold_sc = 0.6 * cls_sc + 0.4 * reg_n
+                else:
+                    fold_sc = cls_sc.copy()
+                all_fold_scores.append(fold_sc)
+
+            scores = np.mean(all_fold_scores, axis=0)
         else:
-            scores = cls_scores.copy()
+            # Fallback: single model (backward compat)
+            if self.feature_medians is not None:
+                df_features = df_features.fillna(self.feature_medians)
+            else:
+                df_features = df_features.fillna(0.0)
+
+            proba = self.automl.predict_proba(df_features)
+            if proba.ndim == 2:
+                cls_scores = proba[:, 1]
+            else:
+                cls_scores = proba
+
+            has_ltr = self.ltr_model is not None
+            has_reg = self.regression_model is not None
+
+            if has_ltr:
+                dmat = xgb.DMatrix(df_features)
+                ltr_scores = self.ltr_model.predict(dmat)
+                ltr_norm = 1.0 / (1.0 + np.exp(-ltr_scores))
+            else:
+                ltr_norm = None
+
+            if has_reg:
+                reg_pred = self.regression_model.predict(df_features)
+                reg_norm = 1.0 / (1.0 + np.exp(-reg_pred * 2))
+            else:
+                reg_norm = None
+
+            if has_ltr and has_reg:
+                scores = W_CLS * cls_scores + W_LTR * ltr_norm + W_REG * reg_norm
+            elif has_ltr:
+                w = LTR_ENSEMBLE_WEIGHT
+                scores = (1 - w) * cls_scores + w * ltr_norm
+            elif has_reg:
+                scores = 0.6 * cls_scores + 0.4 * reg_norm
+            else:
+                scores = cls_scores.copy()
 
         if apply_adjustments:
             # Volatility-aware scoring: boost higher-volatility stocks
@@ -1929,6 +1971,23 @@ class StockReturnPredictor:
             logger.info(
                 "Ticker calibration saved (%d entries)", len(self.ticker_calibration),
             )
+        # Save walk-forward fold models for ensemble inference
+        if self.fold_models:
+            FOLD_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            for fm in self.fold_models:
+                fold_idx = fm["fold"]
+                fold_dir = FOLD_MODELS_DIR / f"fold_{fold_idx}"
+                fold_dir.mkdir(parents=True, exist_ok=True)
+                joblib.dump(fm["automl"], fold_dir / "automl.pkl")
+                joblib.dump(fm["feature_medians"], fold_dir / "feature_medians.pkl")
+                if fm.get("ltr_model") is not None:
+                    fm["ltr_model"].save_model(str(fold_dir / "ltr_model.json"))
+                if fm.get("regression_model") is not None:
+                    joblib.dump(fm["regression_model"], fold_dir / "regression_model.pkl")
+            joblib.dump(len(self.fold_models), FOLD_MODELS_DIR / "n_folds.pkl")
+            logger.info(
+                "Walk-forward ensemble saved: %d fold models", len(self.fold_models),
+            )
         # Save metadata for version-mismatch detection
         meta = {
             "python_version": platform.python_version(),
@@ -2040,6 +2099,40 @@ class StockReturnPredictor:
                 logger.warning(
                     "Could not load ticker calibration — skipping (may need retraining)"
                 )
+        # Load walk-forward fold models for ensemble inference
+        n_folds_path = FOLD_MODELS_DIR / "n_folds.pkl"
+        if n_folds_path.exists():
+            try:
+                n_folds = joblib.load(n_folds_path)
+                self.fold_models = []
+                for fold_idx in range(1, n_folds + 1):
+                    fold_dir = FOLD_MODELS_DIR / f"fold_{fold_idx}"
+                    if not fold_dir.exists():
+                        continue
+                    fm: dict = {
+                        "fold": fold_idx,
+                        "automl": joblib.load(fold_dir / "automl.pkl"),
+                        "feature_medians": joblib.load(fold_dir / "feature_medians.pkl"),
+                        "ltr_model": None,
+                        "regression_model": None,
+                    }
+                    ltr_path = fold_dir / "ltr_model.json"
+                    if ltr_path.exists():
+                        fm["ltr_model"] = xgb.Booster()
+                        fm["ltr_model"].load_model(str(ltr_path))
+                    reg_path = fold_dir / "regression_model.pkl"
+                    if reg_path.exists():
+                        fm["regression_model"] = joblib.load(reg_path)
+                    self.fold_models.append(fm)
+                logger.info(
+                    "Walk-forward ensemble loaded: %d fold models",
+                    len(self.fold_models),
+                )
+            except (KeyError, Exception) as e:
+                logger.warning(
+                    "Could not load fold models — falling back to single model: %s", e,
+                )
+                self.fold_models = []
         self.is_trained = True
         logger.info("Model loaded from %s", MODEL_PATH)
 
