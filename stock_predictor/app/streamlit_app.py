@@ -1194,15 +1194,34 @@ elif page == "Stock Analysis":
         shap_items = pred.get("explanation", [])
         if shap_items:
             st.markdown("---")
-            st.markdown("**🔍 SHAP Explanation** (top contributing features)")
-            shap_cols = st.columns(len(shap_items))
-            for i, item in enumerate(shap_items):
-                direction = "↑" if item["direction"] == "+" else "↓"
-                shap_cols[i].metric(
-                    item["feature"],
-                    f"{item['feature_value']:.3f}",
-                    f"{direction} {item['shap_value']:+.4f}",
-                )
+            st.subheader("SHAP Explanation")
+            st.caption("Top features driving the prediction. Positive (blue) pushes toward BUY, negative (red) pushes toward HOLD.")
+
+            import plotly.graph_objects as _shap_go
+
+            _shap_features = [item["feature"] for item in shap_items][::-1]
+            _shap_values = [item["shap_value"] for item in shap_items][::-1]
+            _shap_colors = ["#636EFA" if v >= 0 else "#EF553B" for v in _shap_values]
+            _shap_text = [
+                f"{item['feature_value']:.3f}" for item in shap_items
+            ][::-1]
+
+            _shap_fig = _shap_go.Figure(_shap_go.Bar(
+                x=_shap_values,
+                y=_shap_features,
+                orientation="h",
+                marker_color=_shap_colors,
+                text=_shap_text,
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>SHAP: %{x:+.4f}<br>Value: %{text}<extra></extra>",
+            ))
+            _shap_fig.update_layout(
+                height=max(250, len(shap_items) * 50),
+                xaxis_title="SHAP Value (impact on prediction)",
+                yaxis_title="",
+                showlegend=False,
+            )
+            st.plotly_chart(_shap_fig, use_container_width=True)
 
         # ── 3. Social Buzz ────────────────────────────────────────
         buzz = sa_data.get("buzz")
