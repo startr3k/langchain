@@ -62,7 +62,7 @@ _FALLBACK_TICKERS: set[str] = {
     "HCA", "ELV", "HUM", "CVS",
 }
 
-MIN_MARKET_CAP = 500_000_000  # $500M
+MIN_MARKET_CAP = 300_000_000  # $300M
 
 
 @lru_cache(maxsize=1)
