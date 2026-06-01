@@ -1993,14 +1993,27 @@ elif page == "Daily Picks Pipeline":
         "(does NOT overwrite `training_data_10y_full.csv`)."
     )
 
+    # Track whether a retrain is currently running
+    if "retrain_in_progress" not in st.session_state:
+        st.session_state["retrain_in_progress"] = False
+
+    _retrain_running = st.session_state["retrain_in_progress"]
+
+    if _retrain_running:
+        st.warning("⏳ Model retraining is in progress. Please wait for it to finish.")
+
     retrain_col1, retrain_col2 = st.columns(2)
     with retrain_col1:
-        retrain_time = st.slider("FLAML time budget (seconds)", 60, 600, 300, key="retrain_time")
+        retrain_time = st.slider("FLAML time budget (seconds)", 60, 600, 300, key="retrain_time",
+                                 disabled=_retrain_running)
     with retrain_col2:
-        retrain_folds = st.slider("Walk-forward folds", 3, 10, 5, key="retrain_folds")
+        retrain_folds = st.slider("Walk-forward folds", 3, 10, 5, key="retrain_folds",
+                                  disabled=_retrain_running)
 
-    if st.button("🔄 Retrain Model", type="primary"):
+    if st.button("🔄 Retrain Model", type="primary", disabled=_retrain_running):
         import os as _os
+
+        st.session_state["retrain_in_progress"] = True
 
         _project_root = Path(DEFAULT_CSV_PATH).parent
         _original_csv = _project_root / "training_data_10y_full.csv"
@@ -2129,6 +2142,8 @@ elif page == "Daily Picks Pipeline":
         except Exception as e:
             logger.exception("Retrain failed")
             st.error(f"Retrain error: {e}")
+        finally:
+            st.session_state["retrain_in_progress"] = False
 
     # Show raw CSV
     if DEFAULT_CSV_PATH.exists():
