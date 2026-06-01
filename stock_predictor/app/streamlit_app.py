@@ -205,8 +205,6 @@ if page == "Top Recommendations":
                 "Z_ltr": float(row.get("z_ltr", 0)) if pd.notna(row.get("z_ltr")) else 0.0,
                 "Score": float(row.get("ensemble_score", 0)) if pd.notna(row.get("ensemble_score")) else 0.0,
                 "Elite Pool Size": int(row.get("elite_pool_size", 0)) if pd.notna(row.get("elite_pool_size")) else 0,
-                "Sentiment Score": round(sentiment_normalized, 4),
-                "Composite Score": round(prob, 4),  # pipeline already ranked by ensemble
                 "Signal": row.get("signal", "BUY"),
                 "Vol Surge 3d": vol_surge_str,
                 "Regime Confidence": float(row.get("regime_confidence", 0.5)),
@@ -387,8 +385,6 @@ if page == "Top Recommendations":
             "Z_cls": "{:+.2f}",
             "Z_ltr": "{:+.2f}",
             "Score": "{:.3f}",
-            "Sentiment Score": "{:.1%}",
-            "Composite Score": "{:.1%}",
             "Sentiment Polarity": "{:+.3f}",
         }),
         use_container_width=True,
@@ -593,20 +589,6 @@ if page == "Top Recommendations":
                         f"{analysis.get('error', '')}"
                     )
 
-    # Highlight BUY signals
-    buy_picks = [r for r in top_results if r.get("Signal") == "BUY"]
-    if buy_picks:
-        st.success(f"**{len(buy_picks)} BUY signals** in top {len(top_results)}:")
-        for r in buy_picks:
-            model_p = r["Model P(≥20%)"]
-            sent_p = r["Sentiment Polarity"]
-            mentions = r["Total Mentions"]
-            st.write(
-                f"**{r['Ticker']}** — "
-                f"Model: {model_p:.1%}, "
-                f"Sentiment: {sent_p:+.3f} "
-                f"({mentions} mentions)"
-            )
 
 
 # ---------------------------------------------------------------------------
