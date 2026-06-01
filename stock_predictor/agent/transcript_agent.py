@@ -11,12 +11,19 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Optional
 
 import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Load data dictionary for inclusion in transcript analysis LLM calls.
+_DATA_DICT_PATH = Path(__file__).resolve().parent.parent.parent / "data_dictionary.md"
+_DATA_DICTIONARY: str = ""
+if _DATA_DICT_PATH.exists():
+    _DATA_DICTIONARY = _DATA_DICT_PATH.read_text()
 
 SEC_HEADERS = {
     "User-Agent": "StockPredictor Research research@example.com",
@@ -424,7 +431,10 @@ def extract_forward_guidance(
         "You are an expert financial analyst specializing in earnings call "
         "transcript analysis. Your task is to extract forward guidance and "
         "forward-looking initiatives from the transcript. Be specific and "
-        "cite numbers when available."
+        "cite numbers when available.\n\n"
+        "## Data Dictionary Reference\n"
+        "Use this to understand the pipeline metrics and scoring:\n\n"
+        f"{_DATA_DICTIONARY}"
     ))
 
     user_msg = HumanMessage(content=f"""Analyze this earnings call transcript for {ticker} and answer:
