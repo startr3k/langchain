@@ -444,6 +444,42 @@ if page == "Top Recommendations":
                     else:
                         st.markdown(f"- {part}")
 
+            # Forward guidance from earnings call transcript
+            st.markdown("---")
+            guidance_key = f"guidance_{ticker_name}"
+            if st.button(
+                f"📞 Fetch Forward Guidance ({ticker_name})",
+                key=f"btn_guidance_{ticker_name}",
+            ):
+                if not api_key:
+                    st.error("OpenAI API key required for transcript analysis.")
+                else:
+                    with st.spinner(f"Fetching earnings call transcript for {ticker_name}..."):
+                        try:
+                            from stock_predictor.agent.transcript_agent import (
+                                analyze_ticker_forward_guidance,
+                            )
+                            analysis = analyze_ticker_forward_guidance(
+                                ticker_name, api_key=api_key,
+                                model=model_choice,
+                            )
+                            st.session_state[guidance_key] = analysis
+                        except Exception as e:
+                            st.error(f"Error fetching transcript: {e}")
+
+            if guidance_key in st.session_state:
+                analysis = st.session_state[guidance_key]
+                if analysis.get("found"):
+                    st.markdown(f"**📞 Forward Guidance** (transcript from {analysis.get('date', 'N/A')})")
+                    st.markdown(analysis.get("forward_guidance", "No guidance extracted."))
+                    if analysis.get("source_url"):
+                        st.caption(f"Source: [{analysis['source_url']}]({analysis['source_url']})")
+                else:
+                    st.warning(
+                        f"No earnings call transcript found for {ticker_name}. "
+                        f"{analysis.get('error', '')}"
+                    )
+
     # Highlight BUY signals
     buy_picks = [r for r in top_results if r.get("Signal") == "BUY"]
     if buy_picks:
@@ -636,7 +672,8 @@ elif page == "AI Stock Advisor":
     st.title("AI Stock Investment Advisor")
     st.markdown(
         "Ask the AI agent for stock recommendations. It uses YFinance data, "
-        "social media sentiment, and a trained prediction model to provide analysis."
+        "social media sentiment, a trained prediction model, and **earnings call "
+        "transcript analysis** (forward guidance) to provide analysis."
     )
 
     if "chat_history" not in st.session_state:

@@ -1,11 +1,12 @@
 """LangChain tools for the stock recommendation agent.
 
-Five tools:
+Six tools:
 1. YFinanceTool — fetches market data and fundamentals
 2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz
 3. StockPredictorTool — runs the AutoML model to predict 3-month returns
 4. ScanTrendingStocksTool — scans trending stocks from social media
 5. ScanFullUniverseTool — scans all 616 NASDAQ tickers from the training dataset
+6. EarningsCallTranscriptTool — fetches and analyzes forward guidance from earnings calls
 """
 
 from __future__ import annotations
@@ -329,3 +330,49 @@ def scan_full_universe_tool(top_n: int = 10) -> str:
         indent=2,
         default=str,
     )
+
+
+@tool
+def earnings_call_transcript_tool(tickers: str) -> str:
+    """Fetch the latest earnings call transcript and extract forward guidance for one or more tickers.
+
+    Searches SEC EDGAR 8-K filings for the most recent earnings call transcript,
+    then uses AI to extract forward guidance, forward-looking initiatives, key
+    management quotes, and risk factors.
+
+    Use this tool AFTER identifying top stock picks to understand what management
+    is saying about the company's future direction and growth plans.
+
+    Args:
+        tickers: Comma-separated ticker symbols (e.g. 'AAPL,NVDA,TSLA' or just 'AAPL').
+
+    Returns:
+        Forward guidance analysis for each ticker including revenue/earnings
+        guidance, strategic initiatives, key quotes, and risk factors.
+    """
+    from stock_predictor.agent.transcript_agent import analyze_ticker_forward_guidance
+
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        return "Error: No tickers provided. Pass one or more comma-separated ticker symbols."
+
+    results = []
+    for ticker in ticker_list:
+        logger.info("Fetching earnings call transcript for %s...", ticker)
+        analysis = analyze_ticker_forward_guidance(ticker)
+
+        if analysis.get("found"):
+            results.append({
+                "ticker": ticker,
+                "transcript_date": analysis.get("date"),
+                "source_url": analysis.get("source_url"),
+                "forward_guidance": analysis.get("forward_guidance"),
+            })
+        else:
+            results.append({
+                "ticker": ticker,
+                "error": analysis.get("error", "Transcript not found"),
+                "forward_guidance": None,
+            })
+
+    return json.dumps(results, indent=2, default=str)
