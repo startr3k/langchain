@@ -75,7 +75,7 @@ def get_run_log() -> list[dict]:
 # ------------------------------------------------------------------
 
 def _run_pipeline_job() -> None:
-    """Execute the daily picks pipeline and log the result."""
+    """Execute the daily picks pipeline, log the result, and send email."""
     start = datetime.now()
     logger.info("Scheduler: starting daily picks pipeline run...")
 
@@ -86,13 +86,28 @@ def _run_pipeline_job() -> None:
         n_picks = len(result) if result is not None else 0
         elapsed = (datetime.now() - start).total_seconds()
 
+        email_sent = False
+        try:
+            from stock_predictor.pipeline.email_notifier import (
+                is_email_configured,
+                send_picks_email,
+            )
+            if is_email_configured():
+                email_sent = send_picks_email(
+                    result if result is not None else __import__("pandas").DataFrame()
+                )
+        except Exception as email_err:
+            logger.warning("Scheduler: email notification failed — %s", email_err)
+
         _append_log({
             "timestamp": start.isoformat(),
             "status": "success",
             "picks": n_picks,
             "elapsed_seconds": round(elapsed, 1),
+            "email_sent": email_sent,
         })
-        logger.info("Scheduler: pipeline completed — %d picks in %.1fs", n_picks, elapsed)
+        logger.info("Scheduler: pipeline completed — %d picks in %.1fs (email=%s)",
+                     n_picks, elapsed, email_sent)
 
     except Exception as e:
         elapsed = (datetime.now() - start).total_seconds()
@@ -101,6 +116,7 @@ def _run_pipeline_job() -> None:
             "status": "error",
             "error": str(e),
             "elapsed_seconds": round(elapsed, 1),
+            "email_sent": False,
         })
         logger.exception("Scheduler: pipeline failed — %s", e)
 

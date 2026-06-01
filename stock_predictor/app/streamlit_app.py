@@ -44,6 +44,12 @@ from stock_predictor.pipeline.scheduler import (
     get_run_log,
     restore_schedule,
 )
+from stock_predictor.pipeline.email_notifier import (
+    get_smtp_config,
+    save_smtp_config,
+    is_email_configured,
+    send_test_email,
+)
 from stock_predictor.pipeline.social_listener import (
     get_social_hottest,
     get_eligible_tickers,
@@ -1632,18 +1638,56 @@ elif page == "Daily Picks Pipeline":
         "to a CSV.  Use the ground-truth evaluator to track precision over time."
     )
 
-    # -- Scheduler section (primary control) ------------------------------
-    st.subheader("⏰ Schedule Pipeline")
+    # -- Scheduler status banner -------------------------------------------
+    st.subheader("⏰ Scheduler Status")
 
     sched_cfg = get_schedule_config()
     active = is_scheduled()
+    run_log = get_run_log()
+
+    # Status columns: schedule status | last run info
+    stat_col1, stat_col2, stat_col3 = st.columns(3)
+
+    with stat_col1:
+        if active:
+            next_run = get_next_run()
+            st.metric(
+                "Schedule",
+                f"{sched_cfg.get('frequency', 'daily').title()}",
+                f"{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC",
+            )
+        else:
+            st.metric("Schedule", "Inactive", "Not configured")
+
+    with stat_col2:
+        if run_log:
+            last = run_log[-1]
+            last_time = last.get("timestamp", "N/A")
+            last_status = last.get("status", "unknown")
+            st.metric(
+                "Last Run",
+                last_time[:16].replace("T", " "),
+                f"{last_status} — {last.get('picks', 0)} picks",
+            )
+        else:
+            st.metric("Last Run", "Never", "No runs yet")
+
+    with stat_col3:
+        if active:
+            next_run = get_next_run()
+            if next_run:
+                st.metric("Next Run", next_run[:16].replace("T", " "), "Scheduled")
+            else:
+                st.metric("Next Run", "N/A", "")
+        else:
+            st.metric("Next Run", "—", "Schedule inactive")
 
     if active:
-        next_run = get_next_run()
+        email_status = "📧 Email ON" if is_email_configured() else "📧 Email OFF"
         st.success(
             f"Pipeline is scheduled **{sched_cfg.get('frequency', 'daily')}** "
-            f"at **{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC**.  "
-            f"Next run: {next_run or 'N/A'}"
+            f"at **{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC** "
+            f"({email_status})"
         )
         if st.button("⏹️ Stop Schedule"):
             stop_schedule()
@@ -1689,8 +1733,94 @@ elif page == "Daily Picks Pipeline":
             )
             st.rerun()
 
-    # Run log
-    run_log = get_run_log()
+    # -- Email notification settings --------------------------------------
+    st.markdown("---")
+    st.subheader("📧 Email Notifications")
+    st.markdown(
+        "Get an email with the daily top-10 picks after each scheduled run. "
+        "For Gmail, use an **App Password** — create one at "
+        "[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)."
+    )
+
+    smtp_cfg = get_smtp_config()
+
+    with st.expander(
+        "Email Settings" + (" ✅" if is_email_configured() else ""),
+        expanded=not is_email_configured(),
+    ):
+        email_col1, email_col2 = st.columns(2)
+        with email_col1:
+            smtp_server = st.text_input(
+                "SMTP Server",
+                value=smtp_cfg.get("smtp_server", "smtp.gmail.com"),
+                key="smtp_server",
+            )
+            smtp_port = st.number_input(
+                "SMTP Port",
+                value=int(smtp_cfg.get("smtp_port", 587)),
+                min_value=1, max_value=65535, step=1,
+                key="smtp_port",
+            )
+            sender_email = st.text_input(
+                "Sender Email (Gmail address)",
+                value=smtp_cfg.get("sender_email", ""),
+                key="sender_email",
+            )
+        with email_col2:
+            sender_password = st.text_input(
+                "App Password",
+                value=smtp_cfg.get("sender_password", ""),
+                type="password",
+                key="sender_password",
+                help="For Gmail, use an App Password (not your regular password).",
+            )
+            recipient_email = st.text_input(
+                "Recipient Email",
+                value=smtp_cfg.get("recipient_email", ""),
+                key="recipient_email",
+                help="Email address to receive daily picks.",
+            )
+            email_enabled = st.checkbox(
+                "Enable email notifications",
+                value=smtp_cfg.get("enabled", False),
+                key="email_enabled",
+            )
+
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            if st.button("💾 Save Email Settings", type="primary"):
+                save_smtp_config({
+                    "enabled": email_enabled,
+                    "smtp_server": smtp_server,
+                    "smtp_port": int(smtp_port),
+                    "sender_email": sender_email,
+                    "sender_password": sender_password,
+                    "recipient_email": recipient_email,
+                })
+                st.success("Email settings saved!")
+                st.rerun()
+        with btn_col2:
+            if st.button("📨 Send Test Email"):
+                if not sender_email or not sender_password or not recipient_email:
+                    st.error("Fill in all email fields first.")
+                else:
+                    # Save first so the test uses the latest settings
+                    save_smtp_config({
+                        "enabled": email_enabled,
+                        "smtp_server": smtp_server,
+                        "smtp_port": int(smtp_port),
+                        "sender_email": sender_email,
+                        "sender_password": sender_password,
+                        "recipient_email": recipient_email,
+                    })
+                    with st.spinner("Sending test email..."):
+                        ok, msg = send_test_email()
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+
+    # -- Run log -----------------------------------------------------------
     if run_log:
         with st.expander(f"Scheduler Run History ({len(run_log)} runs)"):
             log_df = pd.DataFrame(run_log)
