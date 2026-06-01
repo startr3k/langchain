@@ -54,7 +54,7 @@ from stock_predictor.data.feature_engineering import (
     build_training_dataset,
     build_training_row,
 )
-from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
+from stock_predictor.config import get_eligible_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -285,17 +285,7 @@ class StockReturnPredictor:
         """
         if df is None:
             if tickers is None:
-                # Try training CSV first, fall back to full NASDAQ universe
-                _csv = Path(__file__).resolve().parent.parent.parent / "training_data_10y_full.csv"
-                if _csv.exists():
-                    try:
-                        _tmp = pd.read_csv(_csv, usecols=["Ticker"])
-                        tickers = sorted(_tmp["Ticker"].dropna().unique().tolist())
-                        logger.info("Loaded %d tickers from training CSV", len(tickers))
-                    except Exception:
-                        pass
-                if tickers is None:
-                    tickers = fetch_all_nasdaq_tickers()
+                tickers = get_eligible_tickers()
 
             logger.info("Building training dataset for %d tickers...", len(tickers))
             df = build_training_dataset(tickers, include_sentiment=include_sentiment)

@@ -40,6 +40,7 @@ from stock_predictor.data.yfinance_client import (
     compute_technical_features,
     fetch_all_nasdaq_tickers,
 )
+from stock_predictor.config import get_min_market_cap
 from stock_predictor.data.macro_data import get_macro_data, align_macro_to_dates
 from stock_predictor.data.feature_engineering import TECHNICAL_FEATURES
 
@@ -101,12 +102,13 @@ def compute_forward_return(close_prices: np.ndarray, window: int = 63) -> np.nda
 
 
 def main():
+    _default_mcap = get_min_market_cap()
     parser = argparse.ArgumentParser(description="Generate 10-year training dataset")
     parser.add_argument(
         "--min-mcap",
         type=int,
-        default=500_000_000,
-        help="Minimum market cap in USD (default: 500000000 = $500M)",
+        default=_default_mcap,
+        help=f"Minimum market cap in USD (default from ticker_universe.yaml: {_default_mcap})",
     )
     args = parser.parse_args()
 

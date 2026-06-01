@@ -43,3 +43,4 @@ apscheduler>=3.10.0
 # Utilities
 python-dotenv>=1.0.0
 joblib>=1.4.0
+pyyaml>=6.0

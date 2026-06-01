@@ -30,11 +30,10 @@ logger = logging.getLogger(__name__)
 
 # File-based cache for the eligible ticker universe.
 _TICKER_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "eligible_tickers_cache.json"
-_MCAP_CACHE_PATH = str(Path(__file__).resolve().parent.parent.parent / "market_cap_cache.json")
 _TICKER_CACHE_MAX_AGE_HOURS = 24  # refresh if older than this
 
 # ---------------------------------------------------------------------------
-# Dynamic index-ticker fetching (>= $500M market cap, NASDAQ-only)
+# Dynamic index-ticker fetching (market cap filter from ticker_universe.yaml)
 # ---------------------------------------------------------------------------
 
 # Fallback curated list in case dynamic fetch fails
@@ -62,27 +61,21 @@ _FALLBACK_TICKERS: set[str] = {
     "HCA", "ELV", "HUM", "CVS",
 }
 
-MIN_MARKET_CAP = 300_000_000  # $300M
-
-
 @lru_cache(maxsize=1)
 def _fetch_index_tickers_cached() -> frozenset[str]:
-    """Fetch full NASDAQ-listed tickers from the NASDAQ API.
+    """Return eligible tickers using market_cap_cache.json and ticker_universe.yaml.
 
-    Filters to >= $500M market cap via yFinance.  Results are cached for
-    the lifetime of the process (typically one Streamlit session).
+    Results are cached for the lifetime of the process (typically one
+    Streamlit session).
     """
-    from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
+    from stock_predictor.config import get_eligible_tickers
 
     try:
-        tickers = fetch_all_nasdaq_tickers(
-            min_market_cap=MIN_MARKET_CAP,
-            cache_path=_MCAP_CACHE_PATH,
-        )
+        tickers = get_eligible_tickers()
         if tickers:
             return frozenset(tickers)
     except Exception:
-        logger.warning("fetch_all_nasdaq_tickers failed — using fallback list")
+        logger.warning("get_eligible_tickers failed — using fallback list")
 
     return frozenset(_FALLBACK_TICKERS)
 

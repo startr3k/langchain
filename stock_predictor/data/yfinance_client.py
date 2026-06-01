@@ -20,14 +20,14 @@ _TICKER_RE = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?(-[A-Z]{1,2})?$")
 
 
 def fetch_all_nasdaq_tickers(
-    min_market_cap: int = 500_000_000,
+    min_market_cap: int | None = None,
     cache_path: str | None = None,
 ) -> list[str]:
     """Fetch the full NASDAQ-listed ticker universe from the NASDAQ API.
 
     Args:
         min_market_cap: Minimum market cap in USD to include.  Defaults to
-            $500M for institutional-grade liquidity.
+            the value in ``ticker_universe.yaml``.
         cache_path: If provided, write the market cap cache to this JSON file
             so future runs can resume without re-fetching.
 
@@ -35,6 +35,10 @@ def fetch_all_nasdaq_tickers(
         Sorted list of ticker symbols passing the market cap filter.
     """
     import json
+
+    if min_market_cap is None:
+        from stock_predictor.config import get_min_market_cap
+        min_market_cap = get_min_market_cap()
 
     headers = {"User-Agent": "Mozilla/5.0 (StockPredictor/1.0)"}
 

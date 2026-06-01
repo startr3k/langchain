@@ -1,0 +1,8 @@
+# Ticker universe configuration
+# All components that filter by market cap read from this file.
+
+# Minimum market cap (USD) for a ticker to be included in the universe.
+min_market_cap: 500_000_000  # $500M
+
+# Path to the cached market cap data (relative to repo root).
+market_cap_cache: market_cap_cache.json

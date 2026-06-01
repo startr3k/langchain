@@ -650,26 +650,12 @@ def _slow_scan_tickers(
 ) -> list[dict]:
     """Fallback: scan tickers one-by-one via yFinance (slow).
 
-    Ticker source priority:
-      1. Training CSV (all tickers already in the dataset)
-      2. ``fetch_all_nasdaq_tickers()`` (full NASDAQ universe)
+    Loads eligible tickers from ``market_cap_cache.json`` using the market cap
+    threshold in ``ticker_universe.yaml``.
     """
-    tickers_to_scan: list[str] = []
+    from stock_predictor.config import get_eligible_tickers
 
-    # Try training CSV first
-    if _TRAINING_CSV_PATH.exists():
-        try:
-            _df = pd.read_csv(_TRAINING_CSV_PATH, usecols=["Ticker"])
-            tickers_to_scan = sorted(_df["Ticker"].dropna().unique().tolist())
-            logger.info("Slow scan: loaded %d tickers from training CSV", len(tickers_to_scan))
-        except Exception:
-            pass
-
-    # Fallback to full NASDAQ universe
-    if not tickers_to_scan:
-        from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
-        tickers_to_scan = fetch_all_nasdaq_tickers()
-        logger.info("Slow scan: fetched %d tickers from NASDAQ API", len(tickers_to_scan))
+    tickers_to_scan = get_eligible_tickers()
 
     logger.info("Slow scan: %d tickers via yFinance...", len(tickers_to_scan))
 

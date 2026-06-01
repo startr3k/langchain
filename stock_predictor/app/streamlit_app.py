@@ -2065,8 +2065,8 @@ elif page == "Daily Picks Pipeline":
                     )
             else:
                 # ── Full build (no existing CSV) ──
-                from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
-                _tickers = fetch_all_nasdaq_tickers()
+                from stock_predictor.config import get_eligible_tickers
+                _tickers = get_eligible_tickers()
                 status.info("Step 1/4: No existing dataset — building full training data...")
                 progress.progress(5)
                 combined = build_training_dataset(_tickers, include_sentiment=False)
