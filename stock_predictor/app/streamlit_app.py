@@ -718,7 +718,7 @@ if page == "Top Recommendations":
                             resp = client.chat.completions.create(
                                 model=model_choice,
                                 messages=messages,
-                                max_tokens=1000,
+                                max_completion_tokens=1000,
                             )
                             reply = resp.choices[0].message.content
                             st.session_state[chat_key].append(
