@@ -1194,34 +1194,15 @@ elif page == "Stock Analysis":
         shap_items = pred.get("explanation", [])
         if shap_items:
             st.markdown("---")
-            st.subheader("SHAP Explanation")
-            st.caption("Top features driving the prediction. Positive (blue) pushes toward BUY, negative (red) pushes toward HOLD.")
-
-            import plotly.graph_objects as _shap_go
-
-            _shap_features = [item["feature"] for item in shap_items][::-1]
-            _shap_values = [item["shap_value"] for item in shap_items][::-1]
-            _shap_colors = ["#636EFA" if v >= 0 else "#EF553B" for v in _shap_values]
-            _shap_text = [
-                f"{item['feature_value']:.3f}" for item in shap_items
-            ][::-1]
-
-            _shap_fig = _shap_go.Figure(_shap_go.Bar(
-                x=_shap_values,
-                y=_shap_features,
-                orientation="h",
-                marker_color=_shap_colors,
-                text=_shap_text,
-                textposition="outside",
-                hovertemplate="<b>%{y}</b><br>SHAP: %{x:+.4f}<br>Value: %{text}<extra></extra>",
-            ))
-            _shap_fig.update_layout(
-                height=max(250, len(shap_items) * 50),
-                xaxis_title="SHAP Value (impact on prediction)",
-                yaxis_title="",
-                showlegend=False,
-            )
-            st.plotly_chart(_shap_fig, use_container_width=True)
+            st.markdown("**🔍 SHAP Explanation** (top contributing features)")
+            shap_cols = st.columns(len(shap_items))
+            for i, item in enumerate(shap_items):
+                direction = "↑" if item["direction"] == "+" else "↓"
+                shap_cols[i].metric(
+                    item["feature"],
+                    f"{item['feature_value']:.3f}",
+                    f"{direction} {item['shap_value']:+.4f}",
+                )
 
         # ── 3. Social Buzz ────────────────────────────────────────
         buzz = sa_data.get("buzz")
@@ -1497,8 +1478,9 @@ elif page == "Model Explanations":
             with st.spinner("Computing SHAP values (this may take a moment)..."):
                 try:
                     import shap
-                    import matplotlib.pyplot as plt
                     import numpy as _np
+                    import plotly.graph_objects as _shap_me_go
+                    import plotly.express as _shap_me_px
 
                     # Get the underlying model
                     model = _me_predictor.automl.model.estimator
@@ -1535,35 +1517,82 @@ elif page == "Model Explanations":
                         if sv.ndim == 3:
                             sv = sv[:, :, 1]  # class 1
 
-                        # SHAP beeswarm plot
-                        plt.figure(figsize=(10, 8))
-                        shap.summary_plot(
-                            sv,
-                            _sample,
-                            feature_names=list(_sample.columns),
-                            show=False,
-                            max_display=20,
-                            plot_size=None,
-                        )
-                        plt.tight_layout()
-                        st.pyplot(plt.gcf())
-                        plt.close("all")
+                        _feat_names = list(_sample.columns)
+                        _max_display = 20
 
-                        # SHAP bar plot (mean absolute)
-                        st.markdown("#### Mean Absolute SHAP Impact")
-                        plt.figure(figsize=(10, 6))
-                        shap.summary_plot(
-                            sv,
-                            _sample,
-                            feature_names=list(_sample.columns),
-                            plot_type="bar",
-                            show=False,
-                            max_display=20,
-                            plot_size=None,
+                        # Rank features by mean |SHAP|
+                        _mean_abs = _np.abs(sv).mean(axis=0)
+                        _top_idx = _np.argsort(_mean_abs)[-_max_display:][::-1]
+
+                        # ── Beeswarm plot (Plotly scatter) ──
+                        _bee_rows = []
+                        for rank, fi in enumerate(_top_idx):
+                            feat = _feat_names[fi]
+                            vals = sv[:, fi]
+                            feat_vals = _sample.iloc[:, fi].values
+                            # Normalize feature values to [0, 1] for color
+                            fmin, fmax = _np.nanmin(feat_vals), _np.nanmax(feat_vals)
+                            if fmax > fmin:
+                                feat_norm = (feat_vals - fmin) / (fmax - fmin)
+                            else:
+                                feat_norm = _np.full_like(feat_vals, 0.5)
+                            for j in range(len(vals)):
+                                _bee_rows.append({
+                                    "Feature": feat,
+                                    "SHAP Value": float(vals[j]),
+                                    "Feature Value (normalized)": float(feat_norm[j]),
+                                    "Feature Value": float(feat_vals[j]),
+                                    "_rank": rank,
+                                })
+
+                        _bee_df = pd.DataFrame(_bee_rows)
+                        # Map feature names to numeric y positions + jitter
+                        _ordered_feats = [_feat_names[i] for i in _top_idx][::-1]
+                        _feat_to_y = {f: i for i, f in enumerate(_ordered_feats)}
+                        _bee_df["_y"] = _bee_df["Feature"].map(_feat_to_y)
+                        _bee_df["_y_jitter"] = _bee_df["_y"] + _np.random.default_rng(42).uniform(
+                            -0.35, 0.35, size=len(_bee_df)
                         )
-                        plt.tight_layout()
-                        st.pyplot(plt.gcf())
-                        plt.close("all")
+
+                        _bee_fig = _shap_me_px.scatter(
+                            _bee_df,
+                            x="SHAP Value",
+                            y="_y_jitter",
+                            color="Feature Value (normalized)",
+                            color_continuous_scale=["#3B4CC0", "#B40426"],
+                            hover_data={"Feature Value": ":.4f", "SHAP Value": ":+.4f", "Feature Value (normalized)": False, "_rank": False, "_y_jitter": False, "_y": False, "Feature": True},
+                        )
+                        _bee_fig.update_layout(
+                            height=max(500, _max_display * 30),
+                            xaxis_title="SHAP Value (impact on model output)",
+                            yaxis_title="",
+                            yaxis=dict(
+                                tickvals=list(range(len(_ordered_feats))),
+                                ticktext=_ordered_feats,
+                            ),
+                            coloraxis_colorbar_title="Feature<br>Value",
+                        )
+                        _bee_fig.update_traces(marker_size=3, marker_opacity=0.6)
+                        st.plotly_chart(_bee_fig, use_container_width=True)
+
+                        # ── Mean |SHAP| bar plot (Plotly) ──
+                        st.markdown("#### Mean Absolute SHAP Impact")
+                        _bar_names = [_feat_names[i] for i in _top_idx][::-1]
+                        _bar_vals = [float(_mean_abs[i]) for i in _top_idx][::-1]
+                        _bar_fig = _shap_me_go.Figure(_shap_me_go.Bar(
+                            x=_bar_vals,
+                            y=_bar_names,
+                            orientation="h",
+                            marker_color="#636EFA",
+                            hovertemplate="<b>%{y}</b><br>Mean |SHAP|: %{x:.4f}<extra></extra>",
+                        ))
+                        _bar_fig.update_layout(
+                            height=max(400, _max_display * 28),
+                            xaxis_title="Mean |SHAP Value|",
+                            yaxis_title="",
+                            showlegend=False,
+                        )
+                        st.plotly_chart(_bar_fig, use_container_width=True)
 
                         st.session_state["_shap_computed"] = True
                     else:
