@@ -123,6 +123,40 @@ page = st.sidebar.radio(
 )
 
 # ---------------------------------------------------------------------------
+# Shared formatting helpers
+# ---------------------------------------------------------------------------
+def _fmt_mcap(val) -> str:
+    """Format market cap as human-readable string."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return "N/A"
+    if v <= 0:
+        return "N/A"
+    if v >= 1e12:
+        return f"${v / 1e12:.1f}T"
+    if v >= 1e9:
+        return f"${v / 1e9:.1f}B"
+    if v >= 1e6:
+        return f"${v / 1e6:.0f}M"
+    return f"${v:,.0f}"
+
+def _fmt_rsi(val) -> str:
+    """Format RSI with Overbought/Oversold label."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return "N/A"
+    if pd.isna(v):
+        return "N/A"
+    if v >= 70:
+        return f"{v:.1f} (Overbought)"
+    elif v <= 30:
+        return f"{v:.1f} (Oversold)"
+    else:
+        return f"{v:.1f}"
+
+# ---------------------------------------------------------------------------
 # Page: Top Recommendations
 # ---------------------------------------------------------------------------
 if page == "Top Recommendations":
@@ -132,37 +166,6 @@ if page == "Top Recommendations":
         "Loads instantly from the daily picks pipeline if it has already run today.  "
         "🔥 = also trending on social media."
     )
-
-    def _fmt_mcap(val) -> str:
-        """Format market cap as human-readable string."""
-        try:
-            v = float(val)
-        except (TypeError, ValueError):
-            return "N/A"
-        if v <= 0:
-            return "N/A"
-        if v >= 1e12:
-            return f"${v / 1e12:.1f}T"
-        if v >= 1e9:
-            return f"${v / 1e9:.1f}B"
-        if v >= 1e6:
-            return f"${v / 1e6:.0f}M"
-        return f"${v:,.0f}"
-
-    def _fmt_rsi(val) -> str:
-        """Format RSI with Overbought/Oversold label."""
-        try:
-            v = float(val)
-        except (TypeError, ValueError):
-            return "N/A"
-        if pd.isna(v):
-            return "N/A"
-        if v >= 70:
-            return f"{v:.1f} (Overbought)"
-        elif v <= 30:
-            return f"{v:.1f} (Oversold)"
-        else:
-            return f"{v:.1f}"
 
     # ── Helper: load today's picks from the top_recommendations CSV ─
     def _load_todays_picks() -> pd.DataFrame | None:
@@ -2159,16 +2162,61 @@ elif page == "Daily Picks History":
                 sent_label = "Bullish" if avg_sent > 0.05 else ("Bearish" if avg_sent < -0.05 else "Neutral")
                 col4.metric("Avg Sentiment", f"{avg_sent:+.3f} ({sent_label})")
 
-                # Picks table
-                display_cols = ["rank", "ticker", "probability", "signal", "close_price",
-                                "volume_surge_3d", "sentiment_score", "sentiment_mentions",
-                                "regime_confidence", "ticker_calibration"]
-                if "max_upside_pct" in df_day.columns:
-                    display_cols.extend(["max_upside_pct", "hit_20pct"])
+                # Picks table — match Top Recommendations column names
+                rename_map = {
+                    "ticker": "Ticker",
+                    "probability": "Model P(≥20%)",
+                    "cls_proba": "Classifier P",
+                    "pred_mfd": "Pred MFD",
+                    "z_cls": "Z_cls",
+                    "z_ltr": "Z_ltr",
+                    "ensemble_score": "Score",
+                    "elite_pool_size": "Elite Pool Size",
+                    "signal": "Signal",
+                    "volume_surge_3d": "Vol Surge 3d",
+                    "regime_confidence": "Regime Confidence",
+                    "ticker_calibration": "Ticker Calibration",
+                    "sentiment_score": "Sentiment Polarity",
+                    "sentiment_mentions": "Total Mentions",
+                    "rsi_14": "RSI (14)",
+                    "market_cap": "Market Cap",
+                    "sector": "Sector",
+                    "close_price": "Close Price",
+                    "max_upside_pct": "Max Upside %",
+                    "hit_20pct": "Hit 20%",
+                }
+                display_order = [
+                    "Ticker", "Model P(≥20%)", "Classifier P", "Pred MFD",
+                    "Z_cls", "Z_ltr", "Score", "Elite Pool Size", "Signal",
+                    "Vol Surge 3d", "Regime Confidence", "Ticker Calibration",
+                    "Sentiment Polarity", "Total Mentions", "RSI (14)",
+                    "Market Cap", "Sector", "Close Price",
+                    "Max Upside %", "Hit 20%",
+                ]
+                available_raw = [c for c in rename_map if c in df_day.columns]
+                df_display = df_day[available_raw].rename(columns=rename_map)
 
-                available_cols = [c for c in display_cols if c in df_day.columns]
+                # Format columns
+                if "Vol Surge 3d" in df_display.columns:
+                    df_display["Vol Surge 3d"] = df_display["Vol Surge 3d"].apply(
+                        lambda v: f"{v:.2f}x" if pd.notna(v) and v else "N/A"
+                    )
+                if "RSI (14)" in df_display.columns:
+                    df_display["RSI (14)"] = df_display["RSI (14)"].apply(_fmt_rsi)
+                if "Market Cap" in df_display.columns:
+                    df_display["Market Cap"] = df_display["Market Cap"].apply(_fmt_mcap)
+
+                ordered_cols = [c for c in display_order if c in df_display.columns]
                 st.dataframe(
-                    df_day[available_cols],
+                    df_display[ordered_cols].style.format({
+                        "Model P(≥20%)": "{:.1%}",
+                        "Classifier P": "{:.1%}",
+                        "Pred MFD": "{:.1%}",
+                        "Z_cls": "{:+.2f}",
+                        "Z_ltr": "{:+.2f}",
+                        "Score": "{:.3f}",
+                        "Sentiment Polarity": "{:+.3f}",
+                    }, na_rep="N/A"),
                     use_container_width=True,
                     hide_index=True,
                 )
