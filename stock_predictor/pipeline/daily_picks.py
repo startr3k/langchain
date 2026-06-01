@@ -109,6 +109,17 @@ def run_daily_picks(
         logger.warning("No valid predictions — pipeline produced 0 picks.")
         return pd.DataFrame(columns=CSV_COLUMNS)
 
+    # Gate: only record picks when elite pool >= MIN_ELITE_POOL (75)
+    from stock_predictor.models.automl_model import MIN_ELITE_POOL
+
+    pool_size = top_picks[0].get("elite_pool_size", 0)
+    if pool_size < MIN_ELITE_POOL:
+        logger.info(
+            "Elite pool %d < %d — skipping picks for %s (weak signal day)",
+            pool_size, MIN_ELITE_POOL, today_str,
+        )
+        return pd.DataFrame(columns=CSV_COLUMNS)
+
     rows: list[dict] = []
     for rank, r in enumerate(top_picks, 1):
         ticker = r["ticker"]
