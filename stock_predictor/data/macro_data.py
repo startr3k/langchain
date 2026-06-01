@@ -52,15 +52,13 @@ def _fetch_series(ticker: str, period: str = "6y", max_retries: int = 4) -> pd.D
             df.index = pd.to_datetime(df.index)
             return df[["Close"]].rename(columns={"Close": ticker})
         except Exception as e:
-            err_msg = str(e).lower()
-            if "rate" in err_msg or "too many" in err_msg or attempt < max_retries - 1:
-                wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
-                logger.warning("Rate limited fetching %s — retrying in %ds (attempt %d/%d)",
-                               ticker, wait, attempt + 1, max_retries)
-                time.sleep(wait)
-            else:
+            if attempt >= max_retries - 1:
                 logger.debug("Could not fetch %s: %s", ticker, e)
-                return pd.DataFrame()
+                break
+            wait = 2 ** attempt * 5  # 5s, 10s, 20s
+            logger.warning("Error fetching %s — retrying in %ds (attempt %d/%d): %s",
+                           ticker, wait, attempt + 1, max_retries, e)
+            time.sleep(wait)
     logger.warning("Failed to fetch %s after %d attempts", ticker, max_retries)
     return pd.DataFrame()
 
