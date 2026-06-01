@@ -44,6 +44,10 @@ TOP_RECS_CSV_PATH = Path(DEFAULT_CSV_PATH).parent / "top_recommendations.csv"
 # Folder for persisting per-ticker social buzz and forward guidance text files.
 TICKER_DATA_DIR = Path(DEFAULT_CSV_PATH).parent / "ticker_data"
 TICKER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Load data dictionary for inclusion in all LLM chat contexts.
+_DATA_DICT_PATH = Path(DEFAULT_CSV_PATH).parent / "data_dictionary.md"
+_DATA_DICTIONARY = _DATA_DICT_PATH.read_text() if _DATA_DICT_PATH.exists() else ""
 from stock_predictor.pipeline.scheduler import (
     get_schedule_config,
     schedule_pipeline,
@@ -707,7 +711,10 @@ if page == "Top Recommendations":
                                 f"the stock {ticker_name} from an AI stock predictor pipeline. "
                                 "Answer the user's questions based on this data. Be concise and "
                                 "data-driven.\n\n"
-                                f"Available data:\n{context}"
+                                f"Available data:\n{context}\n\n"
+                                "## Data Dictionary Reference\n"
+                                "Use this to understand every column and metric:\n\n"
+                                f"{_DATA_DICTIONARY}"
                             ),
                         },
                     ]

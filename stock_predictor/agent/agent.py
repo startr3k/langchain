@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -23,6 +24,14 @@ from stock_predictor.agent.tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Load data dictionary once at module level for inclusion in all LLM calls.
+_DATA_DICT_PATH = Path(__file__).resolve().parent.parent.parent / "data_dictionary.md"
+_DATA_DICTIONARY: str = ""
+if _DATA_DICT_PATH.exists():
+    _DATA_DICTIONARY = _DATA_DICT_PATH.read_text()
+else:
+    logger.warning("data_dictionary.md not found at %s", _DATA_DICT_PATH)
 
 SYSTEM_PROMPT = """You are an expert investment analyst specializing in US NASDAQ tech stocks.
 Your goal is to identify stocks with high potential returns in the next 3 months.
@@ -119,7 +128,16 @@ Provide structured analysis with:
   from the latest earnings call (from earnings_call_transcript_tool)
 - **Risk Assessment**: Potential downside risks
 - **Recommendation**: Buy/Hold/Avoid with reasoning
+
+## Data Dictionary Reference
+Use this data dictionary to understand every column and metric referenced in
+the tools and pipeline output:
+
+{data_dictionary}
 """
+
+# Inject the data dictionary into the system prompt at import time.
+SYSTEM_PROMPT = SYSTEM_PROMPT.format(data_dictionary=_DATA_DICTIONARY)
 
 
 def create_agent(

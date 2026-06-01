@@ -18,6 +18,8 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+
+
 SEC_HEADERS = {
     "User-Agent": "StockPredictor Research research@example.com",
     "Accept-Encoding": "gzip, deflate",
