@@ -168,67 +168,58 @@ def _text_looks_like_transcript(text: str) -> bool:
 # ------------------------------------------------------------------
 
 def fetch_latest_transcript(ticker: str) -> dict:
-    """Fetch the latest earnings call transcript for a ticker from SEC EDGAR.
+    """Fetch the latest earnings call transcript for a ticker.
 
-    Searches through recent 8-K filings to find exhibits that look like
-    earnings call transcripts.
+    Search order (prefers richer content first):
+    1. Motley Fool — full transcript with prepared remarks + Q&A (~30-50k chars)
+    2. SEC EDGAR 8-K exhibits — CFO commentary / press releases (~5-15k chars)
+    3. EFTS full-text search — SEC filing text search fallback
 
     Returns:
         Dict with keys: ticker, found (bool), date, text, source_url, error.
     """
+    # Try 1: Motley Fool (richest content — full prepared remarks + Q&A)
+    fool_result = _fetch_fool_transcript(ticker)
+    if fool_result.get("found"):
+        return fool_result
+
+    # Try 2: SEC EDGAR 8-K exhibits
     cik = _get_cik(ticker)
-    if cik is None:
-        return {
-            "ticker": ticker,
-            "found": False,
-            "error": f"Could not find SEC CIK for {ticker}",
-        }
+    if cik is not None:
+        filings = _get_recent_8k_filings(cik, max_filings=15)
+        for filing in filings:
+            exhibits = _get_filing_exhibits(cik, filing["accession"])
+            transcript_candidates = [e for e in exhibits if _is_transcript_exhibit(e)]
+            for exhibit in transcript_candidates:
+                text = _download_exhibit(cik, filing["accession"], exhibit["name"])
+                if text and _text_looks_like_transcript(text):
+                    if len(text) > 30000:
+                        text = text[:30000] + "\n\n[... transcript truncated ...]"
 
-    filings = _get_recent_8k_filings(cik, max_filings=15)
-    if not filings:
-        return {
-            "ticker": ticker,
-            "found": False,
-            "error": f"No recent 8-K filings found for {ticker}",
-        }
+                    acc_clean = filing["accession"].replace("-", "")
+                    cik_num = cik.lstrip("0")
+                    source_url = (
+                        f"https://www.sec.gov/Archives/edgar/data/{cik_num}/"
+                        f"{acc_clean}/{exhibit['name']}"
+                    )
+                    return {
+                        "ticker": ticker,
+                        "found": True,
+                        "date": filing["date"],
+                        "text": text,
+                        "source_url": source_url,
+                    }
 
-    for filing in filings:
-        exhibits = _get_filing_exhibits(cik, filing["accession"])
+        # Try 3: EFTS full-text search
+        efts_result = _efts_fallback(ticker, cik)
+        if efts_result.get("found"):
+            return efts_result
 
-        # Look for transcript-like exhibits
-        transcript_candidates = [e for e in exhibits if _is_transcript_exhibit(e)]
-        if not transcript_candidates:
-            continue
-
-        for exhibit in transcript_candidates:
-            text = _download_exhibit(cik, filing["accession"], exhibit["name"])
-            if text and _text_looks_like_transcript(text):
-                # Truncate very long transcripts (keep first ~15k chars
-                # which covers the prepared remarks + start of Q&A)
-                if len(text) > 15000:
-                    text = text[:15000] + "\n\n[... transcript truncated ...]"
-
-                acc_clean = filing["accession"].replace("-", "")
-                cik_num = cik.lstrip("0")
-                source_url = (
-                    f"https://www.sec.gov/Archives/edgar/data/{cik_num}/"
-                    f"{acc_clean}/{exhibit['name']}"
-                )
-                return {
-                    "ticker": ticker,
-                    "found": True,
-                    "date": filing["date"],
-                    "text": text,
-                    "source_url": source_url,
-                }
-
-    # Fallback 1: EFTS full-text search
-    efts_result = _efts_fallback(ticker, cik)
-    if efts_result.get("found"):
-        return efts_result
-
-    # Fallback 2: Motley Fool transcript scraping
-    return _fool_fallback(ticker)
+    return {
+        "ticker": ticker,
+        "found": False,
+        "error": f"No earnings call transcript found for {ticker} (Fool + EDGAR)",
+    }
 
 
 def _efts_fallback(ticker: str, cik: str) -> dict:
@@ -293,83 +284,95 @@ def _efts_fallback(ticker: str, cik: str) -> dict:
         return {"ticker": ticker, "found": False, "error": f"EFTS error: {e}"}
 
 
-def _fool_fallback(ticker: str) -> dict:
-    """Scrape the latest earnings call transcript from Motley Fool."""
+def _fetch_fool_transcript(ticker: str) -> dict:
+    """Fetch the latest earnings call transcript from Motley Fool.
+
+    Uses Fool's monthly sitemaps to find transcript URLs, then scrapes the
+    full transcript text (prepared remarks + Q&A) from the article-body div.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+    }
+
     try:
-        # Use web search to find the Fool transcript URL for this ticker
-        search_url = (
-            f"https://www.google.com/search?q=site:fool.com+"
-            f"{ticker.lower()}+earnings+call+transcript+2026"
-        )
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
+        from datetime import datetime, timedelta
+
+        ticker_lower = ticker.lower()
+        now = datetime.now()
+
+        # Search the last 4 months of Fool sitemaps for this ticker
+        for months_back in range(4):
+            dt = now - timedelta(days=months_back * 30)
+            sitemap_url = (
+                f"https://www.fool.com/sitemap/{dt.strftime('%Y/%m')}"
+            )
+            resp = requests.get(sitemap_url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(resp.text, "xml")
+            for loc in soup.find_all("loc"):
+                url = loc.text
+                if (
+                    "/earnings/call-transcripts/" in url
+                    and f"-{ticker_lower}-" in url.lower()
+                ):
+                    result = _download_fool_page(ticker, url, headers)
+                    if result.get("found"):
+                        return result
+
+        return {"ticker": ticker, "found": False, "error": "No Fool transcript found"}
+
+    except Exception as e:
+        logger.debug("Fool fetch failed for %s: %s", ticker, e)
+        return {
+            "ticker": ticker,
+            "found": False,
+            "error": f"Fool fetch error: {e}",
         }
-        resp = requests.get(search_url, headers=headers, timeout=15)
+
+
+def _download_fool_page(ticker: str, fool_url: str, headers: dict) -> dict:
+    """Download and parse a Fool transcript page."""
+    try:
+        resp = requests.get(fool_url, headers=headers, timeout=30)
         if resp.status_code != 200:
             return {
                 "ticker": ticker,
                 "found": False,
-                "error": f"No transcript found for {ticker} (EDGAR + Fool)",
+                "error": f"Fool HTTP {resp.status_code}",
             }
 
-        # Parse Google results for fool.com transcript links
         soup = BeautifulSoup(resp.text, "html.parser")
-        fool_url = None
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            if "fool.com/earnings/call-transcripts/" in href:
-                # Extract the actual URL from Google's redirect
-                if "/url?q=" in href:
-                    href = href.split("/url?q=")[1].split("&")[0]
-                fool_url = href
-                break
 
-        if not fool_url:
-            return {
-                "ticker": ticker,
-                "found": False,
-                "error": f"No transcript found for {ticker} (EDGAR + Fool)",
-            }
-
-        # Fetch the Fool transcript page
-        resp2 = requests.get(fool_url, headers=headers, timeout=30)
-        if resp2.status_code != 200:
-            return {
-                "ticker": ticker,
-                "found": False,
-                "error": f"Could not fetch Fool transcript (HTTP {resp2.status_code})",
-            }
-
-        soup2 = BeautifulSoup(resp2.text, "html.parser")
-
-        # Extract transcript text from the page
-        # Try article body first, then full page
-        article = soup2.find("article")
-        if article:
-            text = article.get_text(separator="\n", strip=True)
+        # The full transcript is in div with class containing 'article-body'
+        article_body = soup.find(
+            "div", class_=lambda c: c and "article-body" in str(c)
+        )
+        if article_body:
+            text = article_body.get_text(separator="\n", strip=True)
         else:
-            # Remove nav, header, footer elements
-            for tag in soup2.find_all(["nav", "header", "footer", "script", "style"]):
+            # Fallback: strip nav/header/footer and use full page
+            for tag in soup.find_all(["nav", "header", "footer", "script", "style"]):
                 tag.decompose()
-            text = soup2.get_text(separator="\n", strip=True)
+            text = soup.get_text(separator="\n", strip=True)
 
         if len(text) < 200:
             return {
                 "ticker": ticker,
                 "found": False,
-                "error": f"Fool transcript page too short ({len(text)} chars)",
+                "error": f"Fool page too short ({len(text)} chars)",
             }
 
         # Extract date from URL (YYYY/MM/DD pattern)
-        import re as _re
-        date_match = _re.search(r"/(\d{4}/\d{2}/\d{2})/", fool_url)
+        date_match = re.search(r"/(\d{4}/\d{2}/\d{2})/", fool_url)
         date_str = date_match.group(1).replace("/", "-") if date_match else ""
 
-        if len(text) > 15000:
-            text = text[:15000] + "\n\n[... transcript truncated ...]"
+        if len(text) > 30000:
+            text = text[:30000] + "\n\n[... transcript truncated ...]"
 
         return {
             "ticker": ticker,
@@ -379,11 +382,10 @@ def _fool_fallback(ticker: str) -> dict:
             "source_url": fool_url,
         }
     except Exception as e:
-        logger.debug("Fool fallback failed for %s: %s", ticker, e)
         return {
             "ticker": ticker,
             "found": False,
-            "error": f"No transcript found for {ticker} (EDGAR + Fool: {e})",
+            "error": f"Fool download error: {e}",
         }
 
 
