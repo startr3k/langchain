@@ -1,6 +1,6 @@
 """Social media & market buzz listener — surfaces the top-20 hottest stocks
 from Yahoo Finance, Finviz news, and GDELT that are listed on NASDAQ
-with market cap >= $100M.
+with market cap >= $500M.
 
 Data sources:
   - Yahoo Finance Trending (real-time trending tickers)
@@ -61,108 +61,28 @@ _FALLBACK_TICKERS: set[str] = {
     "HCA", "ELV", "HUM", "CVS",
 }
 
-MIN_MARKET_CAP = 100_000_000  # $100M
+MIN_MARKET_CAP = 500_000_000  # $500M
 
 
 @lru_cache(maxsize=1)
 def _fetch_index_tickers_cached() -> frozenset[str]:
-    """Fetch NASDAQ tickers via Wikipedia/yfinance.
+    """Fetch full NASDAQ-listed tickers from the NASDAQ API.
 
-    Uses Wikipedia tables as a reliable public source for index constituents,
-    then filters to >= $100M market cap via yfinance.  Results are cached for
+    Filters to >= $500M market cap via yFinance.  Results are cached for
     the lifetime of the process (typically one Streamlit session).
     """
-    import pandas as pd
+    from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
 
-    tickers: set[str] = set()
-
-    _wiki_headers = {"User-Agent": "StockPredictor/1.0 (python-requests)"}
-
-    def _wiki_read_html(url: str, match: str) -> list[pd.DataFrame]:
-        from io import StringIO
-
-        resp = requests.get(url, headers=_wiki_headers, timeout=15)
-        resp.raise_for_status()
-        return pd.read_html(StringIO(resp.text), match=match)
-
-    # S&P 500 from Wikipedia
     try:
-        tables = _wiki_read_html(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            "Symbol",
+        tickers = fetch_all_nasdaq_tickers(
+            min_market_cap=MIN_MARKET_CAP,
         )
-        if tables:
-            sp500 = tables[0]
-            col = "Symbol" if "Symbol" in sp500.columns else sp500.columns[0]
-            for sym in sp500[col]:
-                t = str(sym).strip().replace(".", "-")
-                if t:
-                    tickers.add(t)
-        logger.info("Fetched %d S&P 500 tickers from Wikipedia", len(tickers))
+        if tickers:
+            return frozenset(tickers)
     except Exception:
-        logger.warning("Could not fetch S&P 500 list from Wikipedia")
+        logger.warning("fetch_all_nasdaq_tickers failed — using fallback list")
 
-    # NASDAQ-100 from Wikipedia
-    try:
-        tables = _wiki_read_html(
-            "https://en.wikipedia.org/wiki/Nasdaq-100",
-            "Ticker",
-        )
-        if tables:
-            ndx = tables[-1]
-            col = "Ticker" if "Ticker" in ndx.columns else ndx.columns[0]
-            before = len(tickers)
-            for sym in ndx[col]:
-                t = str(sym).strip().replace(".", "-")
-                if t:
-                    tickers.add(t)
-            logger.info("Added %d NASDAQ-100 tickers", len(tickers) - before)
-    except Exception:
-        logger.warning("Could not fetch NASDAQ-100 list from Wikipedia")
-
-    # Dow 30 — small enough to hardcode reliably
-    dow30 = {
-        "AAPL", "AMGN", "AXP", "BA", "CAT", "CRM", "CSCO", "CVX", "DIS",
-        "DOW", "GS", "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD",
-        "MMM", "MRK", "MSFT", "NKE", "PG", "TRV", "UNH", "V", "VZ", "WBA", "WMT",
-    }
-    tickers.update(dow30)
-
-    if not tickers:
-        logger.warning("Dynamic fetch returned 0 tickers — using fallback list")
-        return frozenset(_FALLBACK_TICKERS)
-
-    # Filter by market cap >= $1B using yfinance (batch download for speed)
-    logger.info("Filtering %d tickers by market cap >= $100M...", len(tickers))
-    filtered: set[str] = set()
-    try:
-        import yfinance as yf
-        ticker_list = sorted(tickers)
-        batch_size = 50
-        for i in range(0, len(ticker_list), batch_size):
-            batch = ticker_list[i:i + batch_size]
-            batch_str = " ".join(batch)
-            try:
-                data = yf.Tickers(batch_str)
-                for sym in batch:
-                    try:
-                        info = data.tickers[sym].info
-                        mcap = info.get("marketCap", 0)
-                        if mcap and mcap >= MIN_MARKET_CAP:
-                            filtered.add(sym)
-                    except Exception:
-                        filtered.add(sym)
-            except Exception:
-                filtered.update(batch)
-    except ImportError:
-        logger.warning("yfinance not available — skipping market cap filter")
-        filtered = tickers
-
-    if not filtered:
-        filtered = tickers
-
-    logger.info("Filtered to %d tickers with market cap >= $100M", len(filtered))
-    return frozenset(filtered)
+    return frozenset(_FALLBACK_TICKERS)
 
 
 def _load_ticker_cache() -> set[str] | None:
