@@ -1546,19 +1546,30 @@ elif page == "Model Explanations":
                                 })
 
                         _bee_df = pd.DataFrame(_bee_rows)
-                        _bee_fig = _shap_me_px.strip(
+                        # Map feature names to numeric y positions + jitter
+                        _ordered_feats = [_feat_names[i] for i in _top_idx]
+                        _feat_to_y = {f: i for i, f in enumerate(_ordered_feats)}
+                        _bee_df["_y"] = _bee_df["Feature"].map(_feat_to_y)
+                        _bee_df["_y_jitter"] = _bee_df["_y"] + _np.random.default_rng(42).uniform(
+                            -0.35, 0.35, size=len(_bee_df)
+                        )
+
+                        _bee_fig = _shap_me_px.scatter(
                             _bee_df,
                             x="SHAP Value",
-                            y="Feature",
+                            y="_y_jitter",
                             color="Feature Value (normalized)",
                             color_continuous_scale=["#3B4CC0", "#B40426"],
-                            category_orders={"Feature": [_feat_names[i] for i in _top_idx]},
-                            hover_data={"Feature Value": ":.4f", "SHAP Value": ":+.4f", "Feature Value (normalized)": False, "_rank": False},
+                            hover_data={"Feature Value": ":.4f", "SHAP Value": ":+.4f", "Feature Value (normalized)": False, "_rank": False, "_y_jitter": False, "_y": False, "Feature": True},
                         )
                         _bee_fig.update_layout(
                             height=max(500, _max_display * 30),
                             xaxis_title="SHAP Value (impact on model output)",
                             yaxis_title="",
+                            yaxis=dict(
+                                tickvals=list(range(len(_ordered_feats))),
+                                ticktext=_ordered_feats,
+                            ),
                             coloraxis_colorbar_title="Feature<br>Value",
                         )
                         _bee_fig.update_traces(marker_size=3, marker_opacity=0.6)
