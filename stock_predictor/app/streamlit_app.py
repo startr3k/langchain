@@ -199,12 +199,34 @@ if page == "Top Recommendations":
         return results
 
     # ── Check for existing pipeline picks ────────────────────────────
-    today_picks = _load_todays_picks()
+    # Priority: session state cache > CSV file.
+    # This ensures picks survive page navigation even when pool < 75
+    # (not saved to CSV but still in session state).
+    from datetime import date as _date
+    _today_str = _date.today().isoformat()
+
+    if "today_picks_cache" in st.session_state and st.session_state["today_picks_cache"] is not None:
+        cached = st.session_state["today_picks_cache"]
+        # Validate cache is from today (stale if session spans midnight)
+        if "date" in cached.columns and (cached["date"] == _today_str).any():
+            today_picks = cached[cached["date"] == _today_str]
+            source = "session cache"
+        else:
+            del st.session_state["today_picks_cache"]
+            today_picks = _load_todays_picks()
+            source = "CSV"
+            if today_picks is not None:
+                st.session_state["today_picks_cache"] = today_picks
+    else:
+        today_picks = _load_todays_picks()
+        source = "CSV"
+        if today_picks is not None:
+            st.session_state["today_picks_cache"] = today_picks
 
     if today_picks is not None:
         st.success(
-            f"Loaded **{len(today_picks)} picks** from today's pipeline run. "
-            "Data shown instantly from cached results."
+            f"Loaded **{len(today_picks)} picks** from {source}. "
+            "Click Regenerate to re-run."
         )
 
     col_cfg1, col_cfg2 = st.columns([1, 2])
@@ -246,6 +268,9 @@ if page == "Top Recommendations":
                 if new_picks is not None and not new_picks.empty:
                     today_picks = new_picks
                     from_pipeline = True
+
+                    # Always cache in session state for page navigation
+                    st.session_state["today_picks_cache"] = new_picks
 
                     pool_size = int(new_picks["elite_pool_size"].iloc[0]) if "elite_pool_size" in new_picks.columns else 0
 
@@ -465,6 +490,7 @@ if page == "Top Recommendations":
                             )
                             st.session_state[guidance_key] = analysis
                         except Exception as e:
+                            logger.exception("Transcript fetch failed for %s", ticker_name)
                             st.error(f"Error fetching transcript: {e}")
 
             if guidance_key in st.session_state:
