@@ -2023,8 +2023,6 @@ elif page == "Daily Picks Pipeline":
         status = st.empty()
 
         try:
-            from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS as _tickers
-
             # Use extended CSV if it already exists (previous retrain), else original
             _base_csv = _extended_csv if _extended_csv.exists() else _original_csv
 
@@ -2035,10 +2033,14 @@ elif page == "Daily Picks Pipeline":
 
                 original_df = pd.read_csv(_base_csv)
                 original_df["_date"] = pd.to_datetime(original_df["_date"])
+
+                # Use ALL tickers from the existing CSV, not just the hardcoded 50
+                _tickers = original_df["Ticker"].unique().tolist()
+
                 _max_date = original_df["_date"].max()
                 status.info(
                     f"Existing data: {len(original_df):,} rows, "
-                    f"{original_df['Ticker'].nunique()} tickers, "
+                    f"{len(_tickers)} tickers, "
                     f"latest date: {_max_date.date()}"
                 )
 
@@ -2063,6 +2065,7 @@ elif page == "Daily Picks Pipeline":
                     )
             else:
                 # ── Full build (no existing CSV) ──
+                from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS as _tickers
                 status.info("Step 1/4: No existing dataset — building full training data...")
                 progress.progress(5)
                 combined = build_training_dataset(_tickers, include_sentiment=False)
