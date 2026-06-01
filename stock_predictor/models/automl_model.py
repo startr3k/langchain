@@ -304,9 +304,9 @@ class StockReturnPredictor:
         if df.empty:
             raise ValueError("Training dataset is empty — no valid data collected.")
 
-        # --- Quality filter: keep only stocks with revenue and earnings ---
-        # Removes shell companies, pre-revenue biotechs, and SPACs that
-        # contribute mostly NaN fundamental features.
+        # --- Quality filter: keep only stocks with sufficient history and revenue ---
+        # Removes shell companies and pre-revenue biotechs that contribute
+        # mostly NaN fundamental features.
         # Skip for small datasets (e.g. tests) where filtering would
         # remove all data.
         before_filter = len(df)
@@ -322,15 +322,7 @@ class StockReturnPredictor:
             else:
                 tickers_with_rev = tickers_2q
 
-            if "earnings_eps_actual" in df.columns:
-                has_earn = df.groupby("Ticker")["earnings_eps_actual"].apply(
-                    lambda x: x.notna().mean() > 0.5,
-                )
-                tickers_with_earn = set(has_earn[has_earn].index)
-            else:
-                tickers_with_earn = tickers_2q
-
-            quality_tickers = tickers_2q & tickers_with_rev & tickers_with_earn
+            quality_tickers = tickers_2q & tickers_with_rev
             df = df[df["Ticker"].isin(quality_tickers)]
             logger.info(
                 "Quality filter: %d → %d rows (%d tickers kept, %d removed)",
@@ -771,7 +763,7 @@ class StockReturnPredictor:
         df["_date"] = pd.to_datetime(df["_date"])
         df = df.sort_values("_date").reset_index(drop=True)
 
-        # --- Quality filter: keep only stocks with revenue and earnings ---
+        # --- Quality filter: keep only stocks with sufficient history and revenue ---
         before_filter = len(df)
         if "Ticker" in df.columns and before_filter >= 500:
             ticker_counts = df.groupby("Ticker").size()
@@ -785,15 +777,7 @@ class StockReturnPredictor:
             else:
                 tickers_with_rev = tickers_2q
 
-            if "earnings_eps_actual" in df.columns:
-                has_earn = df.groupby("Ticker")["earnings_eps_actual"].apply(
-                    lambda x: x.notna().mean() > 0.5,
-                )
-                tickers_with_earn = set(has_earn[has_earn].index)
-            else:
-                tickers_with_earn = tickers_2q
-
-            quality_tickers = tickers_2q & tickers_with_rev & tickers_with_earn
+            quality_tickers = tickers_2q & tickers_with_rev
             df = df[df["Ticker"].isin(quality_tickers)].reset_index(drop=True)
             logger.info(
                 "Quality filter: %d → %d rows (%d tickers kept, %d removed)",
@@ -850,14 +834,14 @@ class StockReturnPredictor:
             "seed": 42,
         }
 
-        # LTR (LambdaMART) params
+        # LTR (LambdaMART) params — tuned to reduce overfitting
         ltr_params = {
             "objective": "rank:ndcg",
             "eval_metric": "ndcg@10",
-            "max_depth": 6,
-            "learning_rate": 0.05,
-            "min_child_weight": 50,
-            "subsample": 0.7,
+            "max_depth": 4,
+            "learning_rate": 0.03,
+            "min_child_weight": 100,
+            "subsample": 0.5,
             "colsample_bytree": 0.5,
             "reg_alpha": 5.0,
             "reg_lambda": 10.0,
@@ -1002,8 +986,8 @@ class StockReturnPredictor:
             # ---- Stage 3: Cross-Sectional Quantile Transform ----
             # Transform features to per-date percentile ranks for elite survivors
             elite_train_mask = np.ones(len(X_train), dtype=bool)  # train on all
-            X_train_qt = X_train.copy()
-            X_test_qt = X_test.copy()
+            X_train_qt = X_train.astype(np.float64).copy()
+            X_test_qt = X_test.astype(np.float64).copy()
             for col in feature_cols:
                 for dates_arr, X_df in [(train_dates, X_train_qt), (test_dates, X_test_qt)]:
                     for d in np.unique(dates_arr):
@@ -1054,10 +1038,10 @@ class StockReturnPredictor:
 
                 ltr_evals: dict = {}
                 fold_ltr_model = xgb.train(
-                    ltr_params, dtrain_ltr, num_boost_round=500,
+                    ltr_params, dtrain_ltr, num_boost_round=200,
                     evals=[(dtrain_ltr, "train"), (dtest_ltr, "test")],
                     evals_result=ltr_evals,
-                    early_stopping_rounds=50,
+                    early_stopping_rounds=30,
                     verbose_eval=False,
                 )
                 ltr_ndcg_train = ltr_evals["train"]["ndcg@10"][-1]
