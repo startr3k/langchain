@@ -1026,11 +1026,11 @@ elif page == "Stock Analysis":
             # 2. Company info
             cache["info"] = get_stock_info(sa_ticker)
 
-            # 3. Model prediction
+            # 3. Model prediction (with SHAP explanation)
             try:
                 predictor = StockReturnPredictor()
                 predictor.load()
-                cache["prediction"] = predictor.predict_ticker(sa_ticker)
+                cache["prediction"] = predictor.predict_ticker(sa_ticker, include_explanation=True)
             except FileNotFoundError:
                 cache["prediction"] = {"error": "Model not trained yet."}
 
@@ -1177,6 +1177,20 @@ elif page == "Stock Analysis":
                 info_cols = st.columns(min(len(info), 4))
                 for i, (key, value) in enumerate(info.items()):
                     info_cols[i % len(info_cols)].metric(key, str(value))
+
+        # ── SHAP Explanation ───────────────────────────────────────
+        shap_items = pred.get("explanation", [])
+        if shap_items:
+            st.markdown("---")
+            st.markdown("**🔍 SHAP Explanation** (top contributing features)")
+            shap_cols = st.columns(len(shap_items))
+            for i, item in enumerate(shap_items):
+                direction = "↑" if item["direction"] == "+" else "↓"
+                shap_cols[i].metric(
+                    item["feature"],
+                    f"{item['feature_value']:.3f}",
+                    f"{direction} {item['shap_value']:+.4f}",
+                )
 
         # ── 3. Social Buzz ────────────────────────────────────────
         buzz = sa_data.get("buzz")
