@@ -7,6 +7,7 @@ date without look-ahead bias.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -29,20 +30,37 @@ MACRO_FEATURES = [
 ]
 
 
-def _fetch_series(ticker: str, period: str = "6y") -> pd.DataFrame:
-    """Fetch a YFinance series and return date-indexed Close prices."""
-    try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
-        if df.empty:
-            return pd.DataFrame()
-        # Handle multi-level columns from yf.download
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.index = pd.to_datetime(df.index)
-        return df[["Close"]].rename(columns={"Close": ticker})
-    except Exception:
-        logger.debug("Could not fetch %s", ticker)
-        return pd.DataFrame()
+def _fetch_series(ticker: str, period: str = "6y", max_retries: int = 4) -> pd.DataFrame:
+    """Fetch a YFinance series and return date-indexed Close prices.
+
+    Retries with exponential backoff on rate-limit errors.
+    """
+    for attempt in range(max_retries):
+        try:
+            df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+            if df.empty:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt * 5  # 5s, 10s, 20s, 40s
+                    logger.info("Empty result for %s — retrying in %ds (attempt %d/%d)",
+                                ticker, wait, attempt + 1, max_retries)
+                    time.sleep(wait)
+                    continue
+                return pd.DataFrame()
+            # Handle multi-level columns from yf.download
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            df.index = pd.to_datetime(df.index)
+            return df[["Close"]].rename(columns={"Close": ticker})
+        except Exception as e:
+            if attempt >= max_retries - 1:
+                logger.debug("Could not fetch %s: %s", ticker, e)
+                break
+            wait = 2 ** attempt * 5  # 5s, 10s, 20s
+            logger.warning("Error fetching %s — retrying in %ds (attempt %d/%d): %s",
+                           ticker, wait, attempt + 1, max_retries, e)
+            time.sleep(wait)
+    logger.warning("Failed to fetch %s after %d attempts", ticker, max_retries)
+    return pd.DataFrame()
 
 
 def get_macro_data(period: str = "6y") -> pd.DataFrame:
@@ -50,19 +68,19 @@ def get_macro_data(period: str = "6y") -> pd.DataFrame:
 
     Returns a date-indexed DataFrame with MACRO_FEATURES columns.
     """
-    # VIX (CBOE Volatility Index)
+    # Fetch each macro series with brief pauses to avoid rate limiting
     vix = _fetch_series("^VIX", period)
-    # S&P 500
+    time.sleep(1)
     sp500 = _fetch_series("^GSPC", period)
-    # US 10-Year Treasury Yield
+    time.sleep(1)
     tnx = _fetch_series("^TNX", period)
-    # US 2-Year Treasury Yield
+    time.sleep(1)
     irx = _fetch_series("^IRX", period)  # 13-week T-bill as proxy for short end
-    # US Dollar Index
+    time.sleep(1)
     dxy = _fetch_series("DX-Y.NYB", period)
-    # Gold
+    time.sleep(1)
     gold = _fetch_series("GC=F", period)
-    # Crude Oil
+    time.sleep(1)
     oil = _fetch_series("CL=F", period)
 
     # Merge all on date index
