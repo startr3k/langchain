@@ -98,8 +98,9 @@ TECHNICAL_FEATURES = [
 
 # Interaction / derived features computed during training preprocessing.
 # These combine existing features to capture multi-factor signals.
-DERIVED_FEATURES = [
-    "Fundamental_Surprise",    # revenue growth × earnings surprise
+DERIVED_FEATURES: list[str] = [
+    # Fundamental_Surprise was removed — its input (earnings_surprise_pct)
+    # is not present in the training CSV.
 ]
 
 # Current-snapshot fundamentals — EXCLUDED from model training/prediction

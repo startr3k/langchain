@@ -34,6 +34,11 @@ CSV_COLUMNS = [
     "probability",
     "signal",
     "ensemble_score",
+    "elite_pool_size",
+    "cls_proba",
+    "pred_mfd",
+    "z_cls",
+    "z_ltr",
     "ltr_score",
     "classification_score",
     "volume_surge_3d",
@@ -64,7 +69,6 @@ def run_daily_picks(
     *,
     csv_path: Path | str | None = None,
     top_k: int = 10,
-    min_market_cap: float = 100_000_000,
 ) -> pd.DataFrame:
     """Generate today's top-K stock picks and append to the CSV.
 
@@ -99,11 +103,21 @@ def run_daily_picks(
     top_picks = _batch_score_from_cache(
         predictor,
         top_k=top_k,
-        min_market_cap=min_market_cap,
     )
 
     if not top_picks:
         logger.warning("No valid predictions — pipeline produced 0 picks.")
+        return pd.DataFrame(columns=CSV_COLUMNS)
+
+    # Gate: only record picks when elite pool >= MIN_ELITE_POOL (75)
+    from stock_predictor.models.automl_model import MIN_ELITE_POOL
+
+    pool_size = top_picks[0].get("elite_pool_size", 0)
+    if pool_size < MIN_ELITE_POOL:
+        logger.info(
+            "Elite pool %d < %d — skipping picks for %s (weak signal day)",
+            pool_size, MIN_ELITE_POOL, today_str,
+        )
         return pd.DataFrame(columns=CSV_COLUMNS)
 
     rows: list[dict] = []
@@ -132,6 +146,11 @@ def run_daily_picks(
             "probability": round(r.get("probability_gain", 0), 4),
             "signal": r.get("signal", "HOLD"),
             "ensemble_score": round(r.get("ensemble_score", r.get("probability_gain", 0)), 4),
+            "elite_pool_size": r.get("elite_pool_size", 0),
+            "cls_proba": r.get("cls_proba", 0),
+            "pred_mfd": r.get("pred_mfd", 0),
+            "z_cls": r.get("z_cls", 0),
+            "z_ltr": r.get("z_ltr", 0),
             "ltr_score": round(r.get("ltr_score", 0), 4),
             "classification_score": round(r.get("classification_score", r.get("probability_gain", 0)), 4),
             "volume_surge_3d": round(r.get("volume_surge_3d", 0), 2) if r.get("volume_surge_3d") else None,
@@ -270,7 +289,6 @@ def _batch_score_from_cache(
     predictor,
     *,
     top_k: int = 10,
-    min_market_cap: float = 100_000_000,
 ) -> list[dict]:
     """Score all tickers from the cached training CSV in one batch.
 
@@ -283,7 +301,7 @@ def _batch_score_from_cache(
     """
     if not _TRAINING_CSV_PATH.exists():
         logger.warning("Training cache not found at %s — falling back to slow scan", _TRAINING_CSV_PATH)
-        return _slow_scan_tickers(predictor, top_k=top_k, min_market_cap=min_market_cap)
+        return _slow_scan_tickers(predictor, top_k=top_k)
 
     logger.info("Loading cached training data from %s ...", _TRAINING_CSV_PATH)
     cache_df = pd.read_csv(_TRAINING_CSV_PATH)
@@ -292,7 +310,7 @@ def _batch_score_from_cache(
     date_col = "_date" if "_date" in cache_df.columns else "date"
     if date_col not in cache_df.columns:
         logger.warning("Training CSV has no date column — falling back to slow scan")
-        return _slow_scan_tickers(predictor, top_k=top_k, min_market_cap=min_market_cap)
+        return _slow_scan_tickers(predictor, top_k=top_k)
     cache_df["_date"] = pd.to_datetime(cache_df[date_col])
     latest_idx = cache_df.groupby("Ticker")["_date"].idxmax()
     latest_df = cache_df.loc[latest_idx].copy().reset_index(drop=True)
@@ -322,10 +340,30 @@ def _batch_score_from_cache(
         apply_adjustments=True,
     )
 
+    # Extract per-stock stage details from 4-stage pipeline
+    batch_details = getattr(predictor, "_last_batch_details", None)
+    if batch_details:
+        elite_pool_size = batch_details["elite_pool_size"]
+        cls_proba = batch_details["cls_proba"]
+        pred_mfd = batch_details["pred_mfd"]
+        z_cls = batch_details["z_cls"]
+        z_ltr = batch_details["z_ltr"]
+    else:
+        elite_pool_size = int((scores > 0).sum())
+        cls_proba = np.zeros(len(scores))
+        pred_mfd = np.zeros(len(scores))
+        z_cls = np.zeros(len(scores))
+        z_ltr = np.zeros(len(scores))
+    logger.info("Elite pool size: %d / %d tickers", elite_pool_size, len(scores))
+
     # Build results with scores
     scored = pd.DataFrame({
         "ticker": tickers,
         "ensemble_score": scores,
+        "cls_proba": cls_proba,
+        "pred_mfd": pred_mfd,
+        "z_cls": z_cls,
+        "z_ltr": z_ltr,
     })
 
     # Merge back ALL feature columns (needed for SHAP explanations + output)
@@ -337,24 +375,11 @@ def _batch_score_from_cache(
     scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
 
     import yfinance as yf
-    from stock_predictor.pipeline.social_listener import get_eligible_tickers
 
-    # Use the cached eligible ticker universe (616 NASDAQ-only, >= $100M)
-    # instead of querying yfinance for all tickers each run.
-    eligible_set = get_eligible_tickers()
     all_tickers = scored["ticker"].tolist()
-    logger.info(
-        "Filtering %d tickers against %d cached eligible tickers (>= $%.0fB)...",
-        len(all_tickers), len(eligible_set), min_market_cap / 1e9,
-    )
 
-    # Fast set-based filter using the cached universe
-    scored["in_eligible_universe"] = scored["ticker"].isin(eligible_set)
-    eligible = scored[scored["in_eligible_universe"]].copy()
-    logger.info("%d tickers pass cached eligible filter", len(eligible))
-
-    # Take top_k from the filtered list
-    top_candidates = eligible.head(top_k)
+    # Take top_k from the scored list (no market cap filtering)
+    top_candidates = scored.head(top_k)
     candidate_tickers = top_candidates["ticker"].tolist()
 
     # ── Batch-fetch close prices via yf.download (single request) ────
@@ -426,6 +451,11 @@ def _batch_score_from_cache(
             "probability_gain": round(float(row["ensemble_score"]), 4),
             "signal": "BUY",
             "ensemble_score": float(row["ensemble_score"]),
+            "elite_pool_size": elite_pool_size,
+            "cls_proba": round(float(row.get("cls_proba", 0)), 4),
+            "pred_mfd": round(float(row.get("pred_mfd", 0)), 4),
+            "z_cls": round(float(row.get("z_cls", 0)), 3),
+            "z_ltr": round(float(row.get("z_ltr", 0)), 3),
             "ltr_score": 0.0,
             "classification_score": 0.0,
             "volume_surge_3d": round(float(row.get("Volume_Surge_3d", 0)), 2) if pd.notna(row.get("Volume_Surge_3d")) else None,
@@ -449,7 +479,6 @@ def _slow_scan_tickers(
     predictor,
     *,
     top_k: int = 10,
-    min_market_cap: float = 100_000_000,
 ) -> list[dict]:
     """Fallback: scan tickers one-by-one via yFinance (slow)."""
     from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
@@ -466,7 +495,7 @@ def _slow_scan_tickers(
     results: list[dict] = []
     for ticker in tickers_to_scan:
         try:
-            result = predictor.predict_ticker(ticker, min_market_cap=min_market_cap)
+            result = predictor.predict_ticker(ticker)
             if result.get("probability_gain") is not None:
                 results.append(result)
         except Exception:

@@ -1,11 +1,12 @@
 """LangChain tools for the stock recommendation agent.
 
-Five tools:
+Six tools:
 1. YFinanceTool — fetches market data and fundamentals
 2. SocialMediaListenerTool — fetches sentiment from Reddit / Finviz
 3. StockPredictorTool — runs the AutoML model to predict 3-month returns
 4. ScanTrendingStocksTool — scans trending stocks from social media
 5. ScanFullUniverseTool — scans all 616 NASDAQ tickers from the training dataset
+6. EarningsCallTranscriptTool — fetches and analyzes forward guidance from earnings calls
 """
 
 from __future__ import annotations
@@ -132,7 +133,7 @@ def social_media_listener_tool(ticker: str) -> str:
 
 
 @tool
-def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> str:
+def stock_predictor_tool(ticker: str) -> str:
     """Predict the 3-month forward return for a stock using the trained AutoML model.
 
     This tool combines YFinance data and social media sentiment features, then
@@ -141,8 +142,6 @@ def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> s
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA').
-        min_market_cap_millions: Minimum market cap in millions of dollars.
-            Default 100 ($100M). Use 1000 for high-conviction large-cap mode.
 
     Returns:
         JSON with the predicted 3-month return percentage and model confidence.
@@ -155,9 +154,7 @@ def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> s
             "ticker": ticker,
         })
 
-    result = predictor.predict_ticker(
-        ticker, min_market_cap=min_market_cap_millions * 1_000_000
-    )
+    result = predictor.predict_ticker(ticker)
 
     # Add feature importance context
     importance = predictor.get_feature_importance(top_n=10)
@@ -222,19 +219,18 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
 
 
 @tool
-def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.0) -> str:
+def scan_full_universe_tool(top_n: int = 10) -> str:
     """Scan ALL 616 NASDAQ tickers from the training dataset and rank by predicted returns.
 
-    Uses the cached training data to batch-score every ticker in ~5 seconds,
-    then filters by market cap and returns the top-N ranked picks. This is
-    the same logic as the daily picks pipeline.
+    Uses the cached training data to batch-score every ticker in ~5 seconds
+    and returns the top-N ranked picks. This is the same logic as the daily
+    picks pipeline.
 
     Use this tool when the user wants comprehensive "best picks" across the
     entire stock universe — not just trending stocks.
 
     Args:
         top_n: Number of top picks to return (default 10).
-        min_market_cap_billions: Minimum market cap filter in billions (default 1.0).
 
     Returns:
         JSON with the top-N ranked stocks by ensemble score, including
@@ -276,37 +272,107 @@ def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.
         apply_adjustments=True,
     )
 
+    # Extract 4-stage pipeline details
+    batch_details = getattr(predictor, "_last_batch_details", None)
+    if batch_details:
+        elite_pool_size = batch_details["elite_pool_size"]
+        cls_proba = batch_details["cls_proba"]
+        pred_mfd = batch_details["pred_mfd"]
+        z_cls_arr = batch_details["z_cls"]
+        z_ltr_arr = batch_details["z_ltr"]
+    else:
+        elite_pool_size = int((scores > 0).sum())
+        cls_proba = None
+        pred_mfd = None
+        z_cls_arr = None
+        z_ltr_arr = None
+
     scored = pd.DataFrame({
         "ticker": tickers,
         "ensemble_score": scores,
     })
+    if cls_proba is not None:
+        scored["cls_proba"] = cls_proba
+        scored["pred_mfd"] = pred_mfd
+        scored["z_cls"] = z_cls_arr
+        scored["z_ltr"] = z_ltr_arr
     scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
-
-    # Filter by eligible ticker universe (>= min market cap)
-    try:
-        from stock_predictor.pipeline.social_listener import get_eligible_tickers
-        eligible_set = get_eligible_tickers()
-        scored = scored[scored["ticker"].isin(eligible_set)].reset_index(drop=True)
-    except Exception:
-        logger.warning("Could not load eligible ticker cache — returning unfiltered results")
 
     top_picks = scored.head(top_n)
 
     results = []
     for _, row in top_picks.iterrows():
-        results.append({
+        pick = {
             "ticker": row["ticker"],
             "ensemble_score": round(float(row["ensemble_score"]), 4),
             "rank": len(results) + 1,
-        })
+        }
+        if "cls_proba" in row.index:
+            pick["classifier_P"] = round(float(row["cls_proba"]), 4)
+            pick["predicted_MFD"] = f"{float(row['pred_mfd']):.1%}"
+            pick["Z_cls"] = round(float(row["z_cls"]), 2)
+            pick["Z_ltr"] = round(float(row["z_ltr"]), 2)
+        results.append(pick)
 
     return json.dumps(
         {
             "total_tickers_scored": len(scored),
+            "elite_pool_size": elite_pool_size,
+            "pool_signal": (
+                "Strong — pool >= 75"
+                if elite_pool_size >= 75
+                else "Moderate" if elite_pool_size >= 25
+                else "Weak — consider sitting out"
+            ),
             "top_picks": results,
-            "min_market_cap_filter": f"${min_market_cap_billions}B",
-            "source": "Full 616-ticker NASDAQ training universe",
+            "source": "Full NASDAQ training universe",
         },
         indent=2,
         default=str,
     )
+
+
+@tool
+def earnings_call_transcript_tool(tickers: str) -> str:
+    """Fetch the latest earnings call transcript and extract forward guidance for one or more tickers.
+
+    Searches SEC EDGAR 8-K filings for the most recent earnings call transcript,
+    then uses AI to extract forward guidance, forward-looking initiatives, key
+    management quotes, and risk factors.
+
+    Use this tool AFTER identifying top stock picks to understand what management
+    is saying about the company's future direction and growth plans.
+
+    Args:
+        tickers: Comma-separated ticker symbols (e.g. 'AAPL,NVDA,TSLA' or just 'AAPL').
+
+    Returns:
+        Forward guidance analysis for each ticker including revenue/earnings
+        guidance, strategic initiatives, key quotes, and risk factors.
+    """
+    from stock_predictor.agent.transcript_agent import analyze_ticker_forward_guidance
+
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    if not ticker_list:
+        return "Error: No tickers provided. Pass one or more comma-separated ticker symbols."
+
+    results = []
+    for ticker in ticker_list:
+        logger.info("Fetching earnings call transcript for %s...", ticker)
+        analysis = analyze_ticker_forward_guidance(ticker)
+
+        if analysis.get("found"):
+            results.append({
+                "ticker": ticker,
+                "transcript_date": analysis.get("date"),
+                "source_url": analysis.get("source_url"),
+                "forward_guidance": analysis.get("forward_guidance"),
+            })
+        else:
+            results.append({
+                "ticker": ticker,
+                "error": analysis.get("error", "Transcript not found"),
+                "forward_guidance": None,
+            })
+
+    return json.dumps(results, indent=2, default=str)

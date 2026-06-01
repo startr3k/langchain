@@ -44,6 +44,12 @@ from stock_predictor.pipeline.scheduler import (
     get_run_log,
     restore_schedule,
 )
+from stock_predictor.pipeline.email_notifier import (
+    get_smtp_config,
+    save_smtp_config,
+    is_email_configured,
+    send_test_email,
+)
 from stock_predictor.pipeline.social_listener import (
     get_social_hottest,
     get_eligible_tickers,
@@ -113,11 +119,26 @@ page = st.sidebar.radio(
 if page == "Top Recommendations":
     st.title("Top Stock Recommendations")
     st.markdown(
-        "Shows the **top daily stock picks** from the 616 NASDAQ-only ticker universe "
-        "(≥$100M market cap).  Loads instantly from the "
-        "daily picks pipeline if it has already run today.  "
+        "Shows the **top daily stock picks** from the NASDAQ ticker universe.  "
+        "Loads instantly from the daily picks pipeline if it has already run today.  "
         "🔥 = also trending on social media."
     )
+
+    def _fmt_mcap(val) -> str:
+        """Format market cap as human-readable string."""
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return "N/A"
+        if v <= 0:
+            return "N/A"
+        if v >= 1e12:
+            return f"${v / 1e12:.1f}T"
+        if v >= 1e9:
+            return f"${v / 1e9:.1f}B"
+        if v >= 1e6:
+            return f"${v / 1e6:.0f}M"
+        return f"${v:,.0f}"
 
     # ── Helper: load today's picks from the daily_picks CSV ──────────
     def _load_todays_picks() -> pd.DataFrame | None:
@@ -155,6 +176,12 @@ if page == "Top Recommendations":
             results.append({
                 "Ticker": row["ticker"],
                 "Model P(≥20%)": round(prob, 4),
+                "Classifier P": float(row.get("cls_proba", 0)) if pd.notna(row.get("cls_proba")) else 0.0,
+                "Pred MFD": float(row.get("pred_mfd", 0)) if pd.notna(row.get("pred_mfd")) else 0.0,
+                "Z_cls": float(row.get("z_cls", 0)) if pd.notna(row.get("z_cls")) else 0.0,
+                "Z_ltr": float(row.get("z_ltr", 0)) if pd.notna(row.get("z_ltr")) else 0.0,
+                "Score": float(row.get("ensemble_score", 0)) if pd.notna(row.get("ensemble_score")) else 0.0,
+                "Elite Pool Size": int(row.get("elite_pool_size", 0)) if pd.notna(row.get("elite_pool_size")) else 0,
                 "Sentiment Score": round(sentiment_normalized, 4),
                 "Composite Score": round(prob, 4),  # pipeline already ranked by ensemble
                 "Signal": row.get("signal", "BUY"),
@@ -163,7 +190,7 @@ if page == "Top Recommendations":
                 "Ticker Calibration": float(row.get("ticker_calibration", 1.0)),
                 "Sentiment Polarity": round(sent_score, 3),
                 "Total Mentions": int(row.get("sentiment_mentions", 0)),
-                "Market Cap": row.get("market_cap"),
+                "Market Cap": _fmt_mcap(row.get("market_cap")),
                 "Sector": row.get("sector", "N/A"),
                 "Close Price": row.get("close_price"),
                 "SHAP Explanation": shap_str if pd.notna(shap_str) else "",
@@ -200,35 +227,54 @@ if page == "Top Recommendations":
     from_pipeline = False
 
     if regenerate:
-        # Delete today's stale entries and re-run the pipeline
         from datetime import date as _date
 
         csv_path = Path(DEFAULT_CSV_PATH)
+        today_str = _date.today().isoformat()
+
+        # Remove today's rows so run_daily_picks doesn't hit the
+        # "already recorded" cache, then re-run the pipeline.
+        old_rows = None
         if csv_path.exists():
             try:
                 existing = pd.read_csv(csv_path)
-                today_str = _date.today().isoformat()
+                old_rows = existing[existing["date"] == today_str]
                 cleaned = existing[existing["date"] != today_str]
                 cleaned.to_csv(csv_path, index=False)
             except Exception:
                 pass
 
         with st.spinner(
-            "Re-running daily picks pipeline on 616 NASDAQ-only universe "
-            "(≥$100M market cap)..."
+            "Re-running daily picks pipeline on NASDAQ universe..."
         ):
             try:
                 new_picks = run_daily_picks(
                     top_k=max(top_x, 10),
-                    min_market_cap=1_000_000_000,
                 )
                 if new_picks is not None and not new_picks.empty:
                     today_picks = new_picks
                     from_pipeline = True
                     st.success(f"Regenerated {len(today_picks)} picks!")
                 else:
-                    st.warning("Pipeline returned 0 picks.")
+                    # Pool < 75 or no picks — restore old cached rows
+                    if old_rows is not None and not old_rows.empty:
+                        old_rows.to_csv(csv_path, mode="a", header=False, index=False)
+                        today_picks = old_rows
+                        st.warning(
+                            "Elite pool < 75 — weak signal day. "
+                            "Keeping previous cached picks."
+                        )
+                    else:
+                        st.warning(
+                            "Elite pool < 75 — weak signal day. No picks recorded."
+                        )
             except Exception as e:
+                # Restore old rows on error too
+                if old_rows is not None and not old_rows.empty:
+                    try:
+                        old_rows.to_csv(csv_path, mode="a", header=False, index=False)
+                    except Exception:
+                        pass
                 st.error(f"Pipeline error: {e}")
 
     if today_picks is not None and not results:
@@ -277,9 +323,24 @@ if page == "Top Recommendations":
         cols.insert(ticker_idx, "Social Buzz")
         df = df[cols]
 
+    # Show elite pool size banner if available
+    pool_sizes = [r.get("Elite Pool Size", 0) for r in top_results]
+    avg_pool = max(pool_sizes) if pool_sizes else 0
+    if avg_pool > 0:
+        pool_color = "green" if avg_pool >= 75 else "orange" if avg_pool >= 25 else "red"
+        st.markdown(
+            f"**Elite Pool Size: :{pool_color}[{avg_pool}]** "
+            f"({'Strong signal — pool ≥ 75' if avg_pool >= 75 else 'Moderate signal' if avg_pool >= 25 else 'Weak signal — consider sitting out'})"
+        )
+
     st.dataframe(
         df.style.format({
             "Model P(≥20%)": "{:.1%}",
+            "Classifier P": "{:.1%}",
+            "Pred MFD": "{:.1%}",
+            "Z_cls": "{:+.2f}",
+            "Z_ltr": "{:+.2f}",
+            "Score": "{:.3f}",
             "Sentiment Score": "{:.1%}",
             "Composite Score": "{:.1%}",
             "Sentiment Polarity": "{:+.3f}",
@@ -296,40 +357,82 @@ if page == "Top Recommendations":
         signal = r.get("Signal", "HOLD")
         shap_str = r.get("_explanation_str", "") or r.get("SHAP Explanation", "")
 
+        cls_p = r.get("Classifier P", 0)
+        pred_mfd = r.get("Pred MFD", 0)
+        z_cls = r.get("Z_cls", 0)
+        z_ltr = r.get("Z_ltr", 0)
+        score = r.get("Score", 0)
+        pool = r.get("Elite Pool Size", 0)
+
+        mcap_str = r.get("Market Cap", "N/A")
         with st.expander(
-            f"**{ticker_name}** — P(≥20%): {model_p:.1%} | "
-            f"Signal: {signal} | "
+            f"**{ticker_name}** — P: {cls_p:.1%} | "
+            f"MFD: {pred_mfd:.1%} | "
+            f"Score: {score:.3f} | "
+            f"MCap: {mcap_str} | "
             f"Sector: {r.get('Sector', 'N/A')}"
         ):
-            # Summary metrics
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Model P(≥20%)", f"{model_p:.1%}")
-            col2.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
-            col3.metric("Mentions", r["Total Mentions"])
-            col4.metric("Signal", signal)
-
-            # Volume surge and regime indicators
-            vol_surge = r.get("Vol Surge 3d", "N/A")
-            regime_conf = r.get("Regime Confidence", "N/A")
-            ticker_cal = r.get("Ticker Calibration", 1.0)
-            col5, col6, col7, col8 = st.columns(4)
+            # 4-stage pipeline scores
+            st.markdown("**4-Stage Pipeline Scores**")
+            col1, col2, col3, col4, col5 = st.columns(5)
+            col1.metric(
+                "Classifier P", f"{cls_p:.1%}",
+                help="Stage 1: P(MFD ≥ 20%). Gate: P ≥ 0.50",
+            )
+            col2.metric(
+                "Pred MFD", f"{pred_mfd:.1%}",
+                help="Stage 2: Predicted max forward drawdown. Gate: ≥ 25%",
+            )
+            col3.metric(
+                "Z_cls", f"{z_cls:+.2f}",
+                help="Z-score of classifier probability within elite pool",
+            )
+            col4.metric(
+                "Z_ltr", f"{z_ltr:+.2f}",
+                help="Z-score of LTR ranking within elite pool",
+            )
             col5.metric(
+                "Final Score", f"{score:.3f}",
+                help="max(Z_cls, 0) × max(Z_ltr, 0) — both must be above avg",
+            )
+
+            # Pool size, market cap, and signal strength
+            col6, col7, col8, col9, col_mc = st.columns(5)
+            col6.metric(
+                "Elite Pool", pool,
+                help="Stocks passing both gates today. ≥75 = strong signal",
+            )
+            col7.metric("Signal", signal)
+            vol_surge = r.get("Vol Surge 3d", "N/A")
+            col8.metric(
                 "Volume Surge (3d)", vol_surge,
                 help="3-day volume relative to 20-day average",
             )
-            if regime_conf != "N/A":
-                col6.metric(
-                    "Regime Confidence",
-                    f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
-                    help="Market regime model's predicted daily hit rate",
-                )
-            if ticker_cal != 1.0 and ticker_cal is not None:
-                col7.metric(
-                    "Ticker Calibration", f"{ticker_cal:.2f}",
-                    help="Calibration factor (<1.0 = historically underperforms)",
-                )
             if r.get("Close Price"):
-                col8.metric("Last Close", f"${r['Close Price']:.2f}")
+                col9.metric("Last Close", f"${r['Close Price']:.2f}")
+            col_mc.metric(
+                "Market Cap", mcap_str,
+                help="Current market cap (informational, not used for filtering)",
+            )
+
+            # Additional context
+            regime_conf = r.get("Regime Confidence", "N/A")
+            ticker_cal = r.get("Ticker Calibration", 1.0)
+            if regime_conf != "N/A" or (ticker_cal != 1.0 and ticker_cal is not None):
+                col10, col11, col12, col13 = st.columns(4)
+                if regime_conf != "N/A":
+                    col10.metric(
+                        "Regime Confidence",
+                        f"{regime_conf:.0%}" if isinstance(regime_conf, (int, float)) else str(regime_conf),
+                        help="Market regime model's predicted daily hit rate",
+                    )
+                if ticker_cal != 1.0 and ticker_cal is not None:
+                    col11.metric(
+                        "Ticker Calibration", f"{ticker_cal:.2f}",
+                        help="Calibration factor (<1.0 = historically underperforms)",
+                    )
+                col12.metric("Sentiment", f"{r['Sentiment Polarity']:+.3f}")
+                col13.metric("Mentions", r["Total Mentions"])
 
             # SHAP-based prediction explanation
             if shap_str:
@@ -346,6 +449,42 @@ if page == "Top Recommendations":
                             st.markdown(f"- {part}")
                     else:
                         st.markdown(f"- {part}")
+
+            # Forward guidance from earnings call transcript
+            st.markdown("---")
+            guidance_key = f"guidance_{ticker_name}"
+            if st.button(
+                f"📞 Fetch Forward Guidance ({ticker_name})",
+                key=f"btn_guidance_{ticker_name}",
+            ):
+                if not api_key:
+                    st.error("OpenAI API key required for transcript analysis.")
+                else:
+                    with st.spinner(f"Fetching earnings call transcript for {ticker_name}..."):
+                        try:
+                            from stock_predictor.agent.transcript_agent import (
+                                analyze_ticker_forward_guidance,
+                            )
+                            analysis = analyze_ticker_forward_guidance(
+                                ticker_name, api_key=api_key,
+                                model=model_choice,
+                            )
+                            st.session_state[guidance_key] = analysis
+                        except Exception as e:
+                            st.error(f"Error fetching transcript: {e}")
+
+            if guidance_key in st.session_state:
+                analysis = st.session_state[guidance_key]
+                if analysis.get("found"):
+                    st.markdown(f"**📞 Forward Guidance** (transcript from {analysis.get('date', 'N/A')})")
+                    st.markdown(analysis.get("forward_guidance", "No guidance extracted."))
+                    if analysis.get("source_url"):
+                        st.caption(f"Source: [{analysis['source_url']}]({analysis['source_url']})")
+                else:
+                    st.warning(
+                        f"No earnings call transcript found for {ticker_name}. "
+                        f"{analysis.get('error', '')}"
+                    )
 
     # Highlight BUY signals
     buy_picks = [r for r in top_results if r.get("Signal") == "BUY"]
@@ -539,7 +678,8 @@ elif page == "AI Stock Advisor":
     st.title("AI Stock Investment Advisor")
     st.markdown(
         "Ask the AI agent for stock recommendations. It uses YFinance data, "
-        "social media sentiment, and a trained prediction model to provide analysis."
+        "social media sentiment, a trained prediction model, and **earnings call "
+        "transcript analysis** (forward guidance) to provide analysis."
     )
 
     if "chat_history" not in st.session_state:
@@ -1415,8 +1555,7 @@ elif page == "Batch Predictions":
 elif page == "Social Media Listener":
     st.title("🔥 Social Media Listener")
     st.markdown(
-        "Top 20 hottest stocks — filtered to **616 NASDAQ-only** "
-        "listed stocks with **≥ $100M market cap** only.  "
+        "Top 20 hottest stocks — filtered to **NASDAQ-listed** stocks.  "
         "Data sourced from Reddit, Yahoo Finance (trending, most active, day movers), "
         "Finviz news headlines, and GDELT global news."
     )
@@ -1429,10 +1568,10 @@ elif page == "Social Media Listener":
             if cache_info["cached"]:
                 st.write(
                     f"**{len(eligible)}** NASDAQ tickers "
-                    f"with ≥$100M market cap (cached {cache_info['age_hours']}h ago)"
+                    f"(cached {cache_info['age_hours']}h ago)"
                 )
             else:
-                st.write(f"**{len(eligible)}** NASDAQ tickers with ≥$100M market cap")
+                st.write(f"**{len(eligible)}** NASDAQ tickers")
         with col_u2:
             if st.button("🔄 Refresh Tickers", key="refresh_tickers"):
                 with st.spinner("Fetching tickers from Wikipedia + yFinance..."):
@@ -1494,23 +1633,61 @@ elif page == "Daily Picks Pipeline":
     st.title("📋 Daily Picks Pipeline (MLOps)")
     st.markdown(
         "Schedule automated daily stock pick generation.  The pipeline "
-        "scores all tickers from the training universe, filters by market "
-        "cap, and records the top picks with SHAP explanations and sentiment "
+        "scores all tickers from the training universe and records the top "
+        "picks with SHAP explanations, sentiment, and market cap "
         "to a CSV.  Use the ground-truth evaluator to track precision over time."
     )
 
-    # -- Scheduler section (primary control) ------------------------------
-    st.subheader("⏰ Schedule Pipeline")
+    # -- Scheduler status banner -------------------------------------------
+    st.subheader("⏰ Scheduler Status")
 
     sched_cfg = get_schedule_config()
     active = is_scheduled()
+    run_log = get_run_log()
+
+    # Status columns: schedule status | last run info
+    stat_col1, stat_col2, stat_col3 = st.columns(3)
+
+    with stat_col1:
+        if active:
+            next_run = get_next_run()
+            st.metric(
+                "Schedule",
+                f"{sched_cfg.get('frequency', 'daily').title()}",
+                f"{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC",
+            )
+        else:
+            st.metric("Schedule", "Inactive", "Not configured")
+
+    with stat_col2:
+        if run_log:
+            last = run_log[-1]
+            last_time = last.get("timestamp", "N/A")
+            last_status = last.get("status", "unknown")
+            st.metric(
+                "Last Run",
+                last_time[:16].replace("T", " "),
+                f"{last_status} — {last.get('picks', 0)} picks",
+            )
+        else:
+            st.metric("Last Run", "Never", "No runs yet")
+
+    with stat_col3:
+        if active:
+            next_run = get_next_run()
+            if next_run:
+                st.metric("Next Run", next_run[:16].replace("T", " "), "Scheduled")
+            else:
+                st.metric("Next Run", "N/A", "")
+        else:
+            st.metric("Next Run", "—", "Schedule inactive")
 
     if active:
-        next_run = get_next_run()
+        email_status = "📧 Email ON" if is_email_configured() else "📧 Email OFF"
         st.success(
             f"Pipeline is scheduled **{sched_cfg.get('frequency', 'daily')}** "
-            f"at **{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC**.  "
-            f"Next run: {next_run or 'N/A'}"
+            f"at **{sched_cfg.get('hour', 6):02d}:{sched_cfg.get('minute', 0):02d} UTC** "
+            f"({email_status})"
         )
         if st.button("⏹️ Stop Schedule"):
             stop_schedule()
@@ -1544,29 +1721,106 @@ elif page == "Daily Picks Pipeline":
                 index=7,
                 key="sched_dow",
             )
-            sched_mcap = st.selectbox(
-                "Min market cap (schedule)",
-                [("$100M", 100_000_000), ("$500M", 500_000_000), ("$1B", 1_000_000_000)],
-                format_func=lambda x: x[0],
-                index=2,
-                key="sched_mcap",
-            )
-
         if st.button("💾 Save & Start Schedule", type="primary"):
             result = schedule_pipeline(
                 hour=sched_hour,
                 minute=sched_minute,
                 frequency=sched_freq,
                 day_of_week=sched_dow,
-                min_market_cap=sched_mcap[1],
             )
             st.success(
                 f"Schedule saved! Next run: {result.get('next_run', 'N/A')}"
             )
             st.rerun()
 
-    # Run log
-    run_log = get_run_log()
+    # -- Email notification settings --------------------------------------
+    st.markdown("---")
+    st.subheader("📧 Email Notifications")
+    st.markdown(
+        "Get an email with the daily top-10 picks after each scheduled run. "
+        "For Gmail, use an **App Password** — create one at "
+        "[myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords)."
+    )
+
+    smtp_cfg = get_smtp_config()
+
+    with st.expander(
+        "Email Settings" + (" ✅" if is_email_configured() else ""),
+        expanded=not is_email_configured(),
+    ):
+        email_col1, email_col2 = st.columns(2)
+        with email_col1:
+            smtp_server = st.text_input(
+                "SMTP Server",
+                value=smtp_cfg.get("smtp_server", "smtp.gmail.com"),
+                key="smtp_server",
+            )
+            smtp_port = st.number_input(
+                "SMTP Port",
+                value=int(smtp_cfg.get("smtp_port", 587)),
+                min_value=1, max_value=65535, step=1,
+                key="smtp_port",
+            )
+            sender_email = st.text_input(
+                "Sender Email (Gmail address)",
+                value=smtp_cfg.get("sender_email", ""),
+                key="sender_email",
+            )
+        with email_col2:
+            sender_password = st.text_input(
+                "App Password",
+                value=smtp_cfg.get("sender_password", ""),
+                type="password",
+                key="sender_password",
+                help="For Gmail, use an App Password (not your regular password).",
+            )
+            recipient_email = st.text_input(
+                "Recipient Email",
+                value=smtp_cfg.get("recipient_email", ""),
+                key="recipient_email",
+                help="Email address to receive daily picks.",
+            )
+            email_enabled = st.checkbox(
+                "Enable email notifications",
+                value=smtp_cfg.get("enabled", False),
+                key="email_enabled",
+            )
+
+        btn_col1, btn_col2 = st.columns(2)
+        with btn_col1:
+            if st.button("💾 Save Email Settings", type="primary"):
+                save_smtp_config({
+                    "enabled": email_enabled,
+                    "smtp_server": smtp_server,
+                    "smtp_port": int(smtp_port),
+                    "sender_email": sender_email,
+                    "sender_password": sender_password,
+                    "recipient_email": recipient_email,
+                })
+                st.success("Email settings saved!")
+                st.rerun()
+        with btn_col2:
+            if st.button("📨 Send Test Email"):
+                if not sender_email or not sender_password or not recipient_email:
+                    st.error("Fill in all email fields first.")
+                else:
+                    # Save first so the test uses the latest settings
+                    save_smtp_config({
+                        "enabled": email_enabled,
+                        "smtp_server": smtp_server,
+                        "smtp_port": int(smtp_port),
+                        "sender_email": sender_email,
+                        "sender_password": sender_password,
+                        "recipient_email": recipient_email,
+                    })
+                    with st.spinner("Sending test email..."):
+                        ok, msg = send_test_email()
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+
+    # -- Run log -----------------------------------------------------------
     if run_log:
         with st.expander(f"Scheduler Run History ({len(run_log)} runs)"):
             log_df = pd.DataFrame(run_log)

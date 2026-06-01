@@ -75,27 +75,39 @@ def get_run_log() -> list[dict]:
 # ------------------------------------------------------------------
 
 def _run_pipeline_job() -> None:
-    """Execute the daily picks pipeline and log the result."""
-    cfg = _load_config()
-    min_market_cap = cfg.get("min_market_cap", 1_000_000_000)
-
+    """Execute the daily picks pipeline, log the result, and send email."""
     start = datetime.now()
     logger.info("Scheduler: starting daily picks pipeline run...")
 
     try:
         from stock_predictor.pipeline.daily_picks import run_daily_picks
 
-        result = run_daily_picks(min_market_cap=min_market_cap)
+        result = run_daily_picks()
         n_picks = len(result) if result is not None else 0
         elapsed = (datetime.now() - start).total_seconds()
+
+        email_sent = False
+        try:
+            from stock_predictor.pipeline.email_notifier import (
+                is_email_configured,
+                send_picks_email,
+            )
+            if is_email_configured():
+                email_sent = send_picks_email(
+                    result if result is not None else __import__("pandas").DataFrame()
+                )
+        except Exception as email_err:
+            logger.warning("Scheduler: email notification failed — %s", email_err)
 
         _append_log({
             "timestamp": start.isoformat(),
             "status": "success",
             "picks": n_picks,
             "elapsed_seconds": round(elapsed, 1),
+            "email_sent": email_sent,
         })
-        logger.info("Scheduler: pipeline completed — %d picks in %.1fs", n_picks, elapsed)
+        logger.info("Scheduler: pipeline completed — %d picks in %.1fs (email=%s)",
+                     n_picks, elapsed, email_sent)
 
     except Exception as e:
         elapsed = (datetime.now() - start).total_seconds()
@@ -104,6 +116,7 @@ def _run_pipeline_job() -> None:
             "status": "error",
             "error": str(e),
             "elapsed_seconds": round(elapsed, 1),
+            "email_sent": False,
         })
         logger.exception("Scheduler: pipeline failed — %s", e)
 
@@ -133,7 +146,6 @@ def schedule_pipeline(
     minute: int = 0,
     frequency: str = "daily",
     day_of_week: str = "mon-fri",
-    min_market_cap: float = 1_000_000_000,
 ) -> dict:
     """Schedule (or reschedule) the daily picks pipeline.
 
@@ -143,7 +155,6 @@ def schedule_pipeline(
         frequency: 'daily' or 'weekly'.
         day_of_week: Cron day-of-week (e.g. 'mon-fri', 'mon', '0-6').
             Ignored when frequency is 'daily'.
-        min_market_cap: Market cap filter for the pipeline.
 
     Returns:
         Dict with the schedule details.
@@ -182,7 +193,6 @@ def schedule_pipeline(
         "minute": minute,
         "frequency": frequency,
         "day_of_week": day_of_week,
-        "min_market_cap": min_market_cap,
         "updated_at": datetime.now().isoformat(),
     }
     _save_config(cfg)
@@ -234,6 +244,5 @@ def restore_schedule() -> None:
             minute=cfg.get("minute", 0),
             frequency=cfg.get("frequency", "daily"),
             day_of_week=cfg.get("day_of_week", "mon-fri"),
-            min_market_cap=cfg.get("min_market_cap", 1_000_000_000),
         )
         logger.info("Restored pipeline schedule from config")

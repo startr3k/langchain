@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from stock_predictor.agent.tools import (
+    earnings_call_transcript_tool,
     scan_full_universe_tool,
     scan_trending_stocks_tool,
     social_media_listener_tool,
@@ -44,9 +45,13 @@ You have access to the following tools:
    candidates. Fast but limited to ~10-20 trending tickers.
 
 5. **scan_full_universe_tool**: Scans ALL 616 NASDAQ tickers from the training
-   dataset, batch-scores them in ~5 seconds, filters by market cap (>=$100M), and
-   returns the top-N ranked picks. This is the comprehensive scan covering the
-   entire NASDAQ stock universe.
+   dataset, batch-scores them in ~5 seconds, and returns the top-N ranked picks.
+   This is the comprehensive scan covering the entire NASDAQ stock universe.
+
+6. **earnings_call_transcript_tool**: Fetches the latest earnings call transcript
+   from SEC EDGAR and uses AI to extract forward guidance, strategic initiatives,
+   key management quotes, and risk factors. Use this AFTER identifying top picks
+   to understand management's forward outlook. Accepts comma-separated tickers.
 
 ## Choosing the Right Scan Tool:
 - Use **scan_full_universe_tool** when the user asks for:
@@ -69,7 +74,10 @@ You have access to the following tools:
    and technicals.
 3. Use **social_media_listener_tool** to check sentiment and momentum.
 4. Use **stock_predictor_tool** to get the model's return prediction.
-5. Synthesize all data into a clear recommendation with reasoning.
+5. Use **earnings_call_transcript_tool** to get forward guidance from the latest
+   earnings call transcript. Pass all top pick tickers as a comma-separated string.
+6. Synthesize all data into a clear recommendation with reasoning, including
+   management's forward guidance and strategic initiatives.
 
 ## Valuation Analysis:
 When analyzing a stock, always assess whether it is **undervalued**, **fairly valued**,
@@ -107,6 +115,8 @@ Provide structured analysis with:
 - **Current Price & Technicals**: Key technical indicators
 - **Social Sentiment**: Summary of sentiment signals
 - **Fundamentals**: Key financial metrics (P/E, PEG, P/B, EV/EBITDA, margins, ROE)
+- **Forward Guidance**: Management's revenue/earnings guidance and strategic initiatives
+  from the latest earnings call (from earnings_call_transcript_tool)
 - **Risk Assessment**: Potential downside risks
 - **Recommendation**: Buy/Hold/Avoid with reasoning
 """
@@ -147,6 +157,7 @@ def create_agent(
         stock_predictor_tool,
         scan_trending_stocks_tool,
         scan_full_universe_tool,
+        earnings_call_transcript_tool,
     ]
 
     llm_with_tools = llm.bind_tools(tools)
