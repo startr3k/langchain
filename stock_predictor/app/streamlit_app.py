@@ -120,7 +120,6 @@ page = st.sidebar.radio(
         "Social Sentiment",
         "Social Media Listener",
         "Model Training",
-        "Batch Predictions",
         "Daily Picks Pipeline",
         "Daily Picks History",
     ],
@@ -1009,94 +1008,304 @@ elif page == "AI Stock Advisor":
 elif page == "Stock Analysis":
     st.title("Individual Stock Analysis")
 
-    ticker = st.text_input("Enter Ticker Symbol", value="NVDA").upper()
+    sa_ticker = st.text_input("Enter Ticker Symbol", value="NVDA").upper()
+    sa_cache_key = f"sa_cache_{sa_ticker}"
 
-    if st.button("Analyze"):
-        with st.spinner(f"Fetching data for {ticker}..."):
-            col1, col2 = st.columns(2)
+    # ── Analyze button: fetches everything and caches ──────────────
+    if st.button("Analyze", type="primary"):
+        with st.spinner(f"Fetching all data for {sa_ticker}..."):
+            from datetime import date as _sa_date
+            _sa_today = _sa_date.today().isoformat()
+            cache = {"ticker": sa_ticker, "date": _sa_today}
 
-            # Price chart
-            with col1:
-                st.subheader(f"{ticker} Price History")
-                df = get_stock_data(ticker, period="1y")
-                if not df.empty:
-                    import plotly.graph_objects as go
+            # 1. Price data
+            price_df = get_stock_data(sa_ticker, period="1y")
+            cache["price_df"] = price_df
 
-                    fig = go.Figure(
-                        data=[
-                            go.Candlestick(
-                                x=df["Date"],
-                                open=df["Open"],
-                                high=df["High"],
-                                low=df["Low"],
-                                close=df["Close"],
-                            )
-                        ]
-                    )
-                    fig.update_layout(
-                        title=f"{ticker} — 1 Year",
-                        xaxis_title="Date",
-                        yaxis_title="Price ($)",
-                        height=400,
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("No price data available.")
+            # 2. Company info
+            cache["info"] = get_stock_info(sa_ticker)
 
-            # Company info
-            with col2:
-                st.subheader("Company Info")
-                info = get_stock_info(ticker)
-                if info:
-                    for key, value in info.items():
-                        st.metric(key, str(value))
-                else:
-                    st.warning("No company info available.")
-
-            # Prediction
-            st.subheader("Model Prediction")
+            # 3. Model prediction
             try:
                 predictor = StockReturnPredictor()
                 predictor.load()
-                result = predictor.predict_ticker(ticker)
-                if result.get("probability_gain") is not None:
-                    prob = result["probability_gain"]
-                    signal = result.get("signal", "HOLD")
-                    vol_surge = result.get("volume_surge_3d")
-                    regime = result.get("regime_confidence", 0.5)
-                    cal = result.get("ticker_calibration", 1.0)
-                    col_a, col_b, col_c = st.columns(3)
-                    col_a.metric(
-                        "P(≥20% gain in 3M)",
-                        f"{prob * 100:.1f}%",
-                    )
-                    col_b.metric("Signal", signal)
-                    col_c.metric(
-                        "Volume Surge (3d)",
-                        f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
-                        help="3-day volume relative to 20-day average",
-                    )
-                    col_d, col_e = st.columns(2)
-                    col_d.metric(
-                        "Regime Confidence",
-                        f"{regime:.0%}",
-                        help="Market regime model's predicted daily hit rate",
-                    )
-                    if cal < 1.0:
-                        col_e.metric(
-                            "Ticker Calibration",
-                            f"{cal:.2f}",
-                            help="Historical accuracy factor (<1.0 = underperforms in top picks)",
-                        )
-                else:
-                    st.info(result.get("error", "Prediction unavailable."))
+                cache["prediction"] = predictor.predict_ticker(sa_ticker)
             except FileNotFoundError:
-                st.info("Model not trained yet. Go to 'Model Training' to train.")
+                cache["prediction"] = {"error": "Model not trained yet."}
 
-            # Sentiment
-            st.subheader("Social Media Sentiment")
-            sentiment = get_sentiment_summary(ticker)
-            st.text(sentiment)
+            # 4. Social buzz (auto-fetch)
+            try:
+                import requests as _req
+                from bs4 import BeautifulSoup
+                from textblob import TextBlob
+
+                headlines = []
+                resp = _req.get(
+                    f"https://finviz.com/quote.ashx?t={sa_ticker}",
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    news_table = soup.find("table", id="news-table")
+                    if news_table:
+                        for row in news_table.find_all("tr")[:10]:
+                            link = row.find("a")
+                            if link:
+                                text = link.get_text(strip=True)
+                                polarity = TextBlob(text).sentiment.polarity
+                                headlines.append({"headline": text, "sentiment": polarity})
+
+                sentiment_text = get_sentiment_summary(sa_ticker)
+
+                lines = [f"Social Media Buzz for {sa_ticker} ({_sa_today})", "=" * 50]
+                for h in headlines:
+                    s = h["sentiment"]
+                    tag = "POS" if s > 0.1 else ("NEG" if s < -0.1 else "NEU")
+                    lines.append(f"[{tag} {s:+.2f}] {h['headline']}")
+                if sentiment_text:
+                    lines.extend(["", "Sentiment Summary:", sentiment_text])
+                full_text = "\n".join(lines)
+
+                # Persist to file
+                buzz_file = TICKER_DATA_DIR / f"{_sa_today}_{sa_ticker}_social_buzz.txt"
+                buzz_file.write_text(full_text)
+
+                cache["buzz"] = {"headlines": headlines, "sentiment_summary": sentiment_text, "text": full_text}
+            except Exception as e:
+                logger.exception("Social buzz fetch failed for %s", sa_ticker)
+                cache["buzz"] = {"error": str(e)}
+
+            # 5. Forward guidance (auto-fetch)
+            if api_key:
+                try:
+                    from stock_predictor.agent.transcript_agent import analyze_ticker_forward_guidance
+                    analysis = analyze_ticker_forward_guidance(
+                        sa_ticker, api_key=api_key, model=model_choice,
+                    )
+                    if analysis.get("found"):
+                        g_lines = [
+                            f"Forward Guidance for {sa_ticker} ({_sa_today})",
+                            "=" * 50,
+                            f"Transcript date: {analysis.get('date', 'N/A')}",
+                            f"Source: {analysis.get('source_url', 'N/A')}",
+                            "",
+                            analysis.get("forward_guidance", ""),
+                        ]
+                        guidance_file = TICKER_DATA_DIR / f"{_sa_today}_{sa_ticker}_forward_guidance.txt"
+                        guidance_file.write_text("\n".join(g_lines))
+                    cache["guidance"] = analysis
+                except Exception as e:
+                    logger.exception("Transcript fetch failed for %s", sa_ticker)
+                    cache["guidance"] = {"error": str(e)}
+            else:
+                cache["guidance"] = {"error": "OpenAI API key required."}
+
+            st.session_state[sa_cache_key] = cache
+
+    # ── Load from cache (session state → file fallback) ───────────
+    if sa_cache_key not in st.session_state:
+        from datetime import date as _sa_date
+        _sa_today = _sa_date.today().isoformat()
+
+        # Try to restore from persisted files
+        buzz_file = TICKER_DATA_DIR / f"{_sa_today}_{sa_ticker}_social_buzz.txt"
+        guidance_file = TICKER_DATA_DIR / f"{_sa_today}_{sa_ticker}_forward_guidance.txt"
+
+        if buzz_file.exists() or guidance_file.exists():
+            cache = {"ticker": sa_ticker, "date": _sa_today, "_from_file": True}
+            if buzz_file.exists():
+                cache["buzz"] = {"_from_file": True, "text": buzz_file.read_text()}
+            if guidance_file.exists():
+                cache["guidance"] = {"found": True, "_from_file": True, "text": guidance_file.read_text()}
+            st.session_state[sa_cache_key] = cache
+
+    # ── Display cached results ────────────────────────────────────
+    if sa_cache_key in st.session_state:
+        sa_data = st.session_state[sa_cache_key]
+
+        # ── 1. Big chart on top (full width) ──────────────────────
+        price_df = sa_data.get("price_df")
+        if price_df is None and not sa_data.get("_from_file"):
+            pass  # file-only restore doesn't have price data
+        elif price_df is not None and not price_df.empty:
+            import plotly.graph_objects as go
+
+            fig = go.Figure(
+                data=[
+                    go.Candlestick(
+                        x=price_df["Date"],
+                        open=price_df["Open"],
+                        high=price_df["High"],
+                        low=price_df["Low"],
+                        close=price_df["Close"],
+                    )
+                ]
+            )
+            fig.update_layout(
+                title=f"{sa_ticker} — 1 Year",
+                xaxis_title="Date",
+                yaxis_title="Price ($)",
+                height=600,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # ── 2. Concise prediction + company info row ──────────────
+        pred = sa_data.get("prediction", {})
+        info = sa_data.get("info")
+
+        if pred.get("probability_gain") is not None:
+            prob = pred["probability_gain"]
+            signal = pred.get("signal", "HOLD")
+            vol_surge = pred.get("volume_surge_3d")
+            regime = pred.get("regime_confidence", 0.5)
+            cal = pred.get("ticker_calibration", 1.0)
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("P(≥20% in 3M)", f"{prob * 100:.1f}%")
+            c2.metric("Signal", signal)
+            c3.metric("Vol Surge 3d", f"{vol_surge:.2f}x" if vol_surge is not None else "N/A")
+            c4.metric("Regime Conf.", f"{regime:.0%}")
+            if cal < 1.0:
+                c5.metric("Calibration", f"{cal:.2f}")
+        elif pred.get("error"):
+            st.info(pred["error"])
+
+        if info:
+            with st.expander("Company Info"):
+                info_cols = st.columns(min(len(info), 4))
+                for i, (key, value) in enumerate(info.items()):
+                    info_cols[i % len(info_cols)].metric(key, str(value))
+
+        # ── 3. Social Buzz ────────────────────────────────────────
+        buzz = sa_data.get("buzz")
+        if buzz and not buzz.get("error"):
+            st.markdown("---")
+            st.markdown(f"**📊 Social Media Buzz**")
+            if buzz.get("_from_file"):
+                st.text(buzz["text"])
+            else:
+                headlines = buzz.get("headlines", [])
+                if headlines:
+                    for item in headlines:
+                        sent = item["sentiment"]
+                        icon = "🟢" if sent > 0.1 else ("🔴" if sent < -0.1 else "⚪")
+                        st.markdown(f"{icon} {item['headline']} `({sent:+.2f})`")
+                sent_text = buzz.get("sentiment_summary", "")
+                if sent_text:
+                    st.caption(sent_text)
+
+        # ── 4. Forward Guidance ───────────────────────────────────
+        guidance = sa_data.get("guidance")
+        if guidance:
+            st.markdown("---")
+            if guidance.get("error"):
+                st.warning(f"Forward guidance: {guidance['error']}")
+            elif guidance.get("found") or guidance.get("forward_guidance"):
+                if guidance.get("_from_file"):
+                    st.markdown(f"**📞 Forward Guidance** (loaded from file)")
+                    st.text(guidance["text"])
+                else:
+                    st.markdown(f"**📞 Forward Guidance** (transcript from {guidance.get('date', 'N/A')})")
+                    st.markdown(guidance.get("forward_guidance", "No guidance extracted."))
+                    if guidance.get("source_url"):
+                        st.caption(f"Source: [{guidance['source_url']}]({guidance['source_url']})")
+            elif not guidance.get("found") and not guidance.get("error"):
+                st.info(f"No earnings call transcript found for {sa_ticker}.")
+
+        # ── 5. Chatbot ────────────────────────────────────────────
+        st.markdown("---")
+        sa_chat_key = f"sa_chat_{sa_ticker}"
+        if sa_chat_key not in st.session_state:
+            st.session_state[sa_chat_key] = []
+
+        st.markdown(f"**💬 Ask about {sa_ticker}**")
+
+        def _build_sa_context(tk: str, data: dict) -> str:
+            parts = [f"Ticker: {tk}"]
+            pred = data.get("prediction", {})
+            if pred.get("probability_gain") is not None:
+                parts.extend([
+                    f"P(>=20% in 3M): {pred['probability_gain']:.1%}",
+                    f"Signal: {pred.get('signal', 'N/A')}",
+                    f"Vol Surge 3d: {pred.get('volume_surge_3d', 'N/A')}",
+                    f"Regime Confidence: {pred.get('regime_confidence', 'N/A')}",
+                    f"Ticker Calibration: {pred.get('ticker_calibration', 'N/A')}",
+                ])
+                # SHAP
+                expl = pred.get("explanation_str", "")
+                if expl:
+                    parts.append(f"SHAP Explanation: {expl}")
+            info = data.get("info")
+            if info:
+                parts.append(f"\nCompany Info: {json.dumps(info, default=str)}")
+            buzz = data.get("buzz")
+            if buzz and not buzz.get("error"):
+                parts.append(f"\nSocial Media Buzz:\n{buzz.get('text', '')}")
+            guidance = data.get("guidance")
+            if guidance and not guidance.get("error"):
+                if guidance.get("_from_file"):
+                    parts.append(f"\nForward Guidance:\n{guidance.get('text', '')}")
+                elif guidance.get("forward_guidance"):
+                    parts.append(f"\nForward Guidance:\n{guidance.get('forward_guidance', '')}")
+            return "\n".join(parts)
+
+        for msg in st.session_state[sa_chat_key]:
+            role_icon = "🧑" if msg["role"] == "user" else "🤖"
+            st.markdown(f"{role_icon} **{msg['role'].title()}:** {msg['content']}")
+
+        sa_chat_col1, sa_chat_col2 = st.columns([5, 1])
+        with sa_chat_col1:
+            sa_user_input = st.text_input(
+                "Ask anything...",
+                key=f"sa_chat_input_{sa_ticker}",
+                label_visibility="collapsed",
+                placeholder=f"Ask about {sa_ticker}...",
+            )
+        with sa_chat_col2:
+            sa_send = st.button("Send", key=f"sa_chat_send_{sa_ticker}")
+
+        if sa_send and sa_user_input:
+            st.session_state[sa_chat_key].append({"role": "user", "content": sa_user_input})
+
+            if not api_key:
+                st.error("OpenAI API key required for chat.")
+            else:
+                context = _build_sa_context(sa_ticker, sa_data)
+                messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a stock analysis assistant. You have detailed data about "
+                            f"the stock {sa_ticker} from an AI stock predictor pipeline. "
+                            "Answer the user's questions based on this data. Be concise and "
+                            "data-driven.\n\n"
+                            f"Available data:\n{context}\n\n"
+                            "## Data Dictionary Reference\n"
+                            "Use this to understand every column and metric:\n\n"
+                            f"{_DATA_DICTIONARY}"
+                        ),
+                    },
+                ]
+                for msg in st.session_state[sa_chat_key]:
+                    messages.append({"role": msg["role"], "content": msg["content"]})
+
+                with st.spinner("Thinking..."):
+                    try:
+                        from openai import OpenAI
+                        client = OpenAI(api_key=api_key)
+                        resp = client.chat.completions.create(
+                            model=model_choice,
+                            messages=messages,
+                            max_completion_tokens=1000,
+                        )
+                        reply = resp.choices[0].message.content
+                        st.session_state[sa_chat_key].append(
+                            {"role": "assistant", "content": reply}
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Chat error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -1698,94 +1907,6 @@ elif page == "Model Training":
         except FileNotFoundError:
             st.warning("No trained model found. Train the model above.")
 
-
-# ---------------------------------------------------------------------------
-# Page: Batch Predictions
-# ---------------------------------------------------------------------------
-elif page == "Batch Predictions":
-    st.title("Batch Stock Predictions")
-    st.markdown("Run the prediction model on multiple stocks to find the best candidates.")
-
-    tickers_input = st.text_area(
-        "Enter tickers (comma-separated)",
-        value=", ".join(NASDAQ_TOP_TICKERS[:20]),
-    )
-
-    top_k = st.selectbox("Top picks to highlight", [5, 10, 20], index=0)
-
-    if st.button("Run Predictions", type="primary"):
-        tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
-
-        try:
-            predictor = StockReturnPredictor()
-            predictor.load()
-
-            results = []
-            progress = st.progress(0)
-            for i, ticker in enumerate(tickers):
-                progress.progress((i + 1) / len(tickers))
-                result = predictor.predict_ticker(ticker)
-                if result.get("probability_gain") is not None:
-                    results.append(result)
-
-            results.sort(key=lambda x: x["probability_gain"], reverse=True)
-
-            # --- Top-K picks ---
-            st.subheader(f"Top {top_k} Picks")
-            top_picks = results[:top_k]
-            top_rows = []
-            for rank, r in enumerate(top_picks, 1):
-                vol_surge = r.get("volume_surge_3d")
-                regime = r.get("regime_confidence", 0.5)
-                cal = r.get("ticker_calibration", 1.0)
-                top_rows.append({
-                    "Rank": rank,
-                    "Ticker": r["ticker"],
-                    "P(≥20% gain)": r["probability_gain"],
-                    "Probability %": r["probability_pct"],
-                    "Signal": r.get("signal", "HOLD"),
-                    "Vol Surge 3d": f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
-                    "Regime Conf.": f"{regime:.0%}",
-                    "Calibration": f"{cal:.2f}" if cal < 1.0 else "—",
-                })
-            st.dataframe(pd.DataFrame(top_rows), use_container_width=True)
-
-            # Regime confidence indicator
-            if top_picks:
-                avg_regime = sum(r.get("regime_confidence", 0.5) for r in top_picks) / len(top_picks)
-                if avg_regime >= 0.6:
-                    st.success(f"Market Regime: Favorable ({avg_regime:.0%} confidence)")
-                elif avg_regime >= 0.4:
-                    st.info(f"Market Regime: Neutral ({avg_regime:.0%} confidence)")
-                else:
-                    st.warning(f"Market Regime: Unfavorable ({avg_regime:.0%} confidence) — picks may underperform")
-
-            # --- Full results ---
-            with st.expander(f"All Results ({len(results)} stocks)"):
-                batch_rows = []
-                for r in results:
-                    vol_surge = r.get("volume_surge_3d")
-                    cal = r.get("ticker_calibration", 1.0)
-                    batch_rows.append({
-                        "Ticker": r["ticker"],
-                        "P(≥20% gain)": r["probability_gain"],
-                        "Probability %": r["probability_pct"],
-                        "Signal": r.get("signal", "HOLD"),
-                        "Vol Surge 3d": f"{vol_surge:.2f}x" if vol_surge is not None else "N/A",
-                        "Calibration": f"{cal:.2f}" if cal < 1.0 else "—",
-                    })
-                st.dataframe(pd.DataFrame(batch_rows), use_container_width=True)
-
-            buy_signals = [r for r in results if r.get("signal") == "BUY"]
-            if buy_signals:
-                st.success(
-                    f"Found {len(buy_signals)} stocks with BUY signal (≥50% probability of 20%+ gain)!"
-                )
-            else:
-                st.info("No stocks with BUY signal found in this batch.")
-
-        except FileNotFoundError:
-            st.error("Model not trained yet. Go to 'Model Training' first.")
 
 # ---------------------------------------------------------------------------
 # Page: Social Media Listener
