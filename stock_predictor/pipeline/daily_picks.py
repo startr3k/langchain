@@ -261,8 +261,13 @@ def evaluate_ground_truth(
 def get_precision_over_time(
     *,
     csv_path: Path | str | None = None,
+    min_pool_size: int | None = None,
 ) -> pd.DataFrame:
     """Compute daily top-10 precision over time from the picks CSV.
+
+    Args:
+        csv_path: Path to the picks CSV.
+        min_pool_size: If set, only include days where elite_pool_size >= this value.
 
     Returns a DataFrame with columns: date, total_picks, hits, precision.
     """
@@ -273,6 +278,10 @@ def get_precision_over_time(
     df = pd.read_csv(csv_path)
     if df.empty or "date" not in df.columns or "hit_20pct" not in df.columns:
         return pd.DataFrame(columns=["date", "total_picks", "hits", "precision"])
+
+    # Filter by pool size if requested
+    if min_pool_size is not None and "elite_pool_size" in df.columns:
+        df = df[df["elite_pool_size"] >= min_pool_size]
 
     # Only include dates where ground truth has been evaluated
     evaluated = df[df["hit_20pct"].notna()].copy()
@@ -290,6 +299,153 @@ def get_precision_over_time(
     result["precision"] = result["hits"] / result["total_picks"]
     result = result.sort_values("date")
     return result
+
+
+def evaluate_folds_at_pool(
+    min_pool: int = 150,
+    output_file: str | Path | None = None,
+) -> dict:
+    """Evaluate saved intermediates at a given pool size threshold.
+
+    Reads intermediates/fold*.pkl and computes top-10 picks per day
+    where elite pool >= min_pool. Optionally writes full results to a file.
+
+    Returns a dict with per-fold results and aggregate summary.
+    """
+    import pickle
+
+    inter_dir = Path(__file__).resolve().parent.parent.parent / "intermediates"
+    if not inter_dir.exists():
+        return {"error": "No intermediates directory found. Train the model first."}
+
+    fold_files = sorted(inter_dir.glob("fold*.pkl"))
+    if not fold_files:
+        return {"error": "No fold intermediates found. Train the model first."}
+
+    ret_threshold = 0.20
+    all_results = []
+    output_lines = []
+
+    for fold_path in fold_files:
+        fold_idx = int(fold_path.stem.replace("fold", ""))
+        with open(fold_path, "rb") as f:
+            d = pickle.load(f)
+
+        y_proba = d["y_proba_test"]
+        ltr_scores = d["ltr_scores"]
+        elite = d["elite_test"]
+        dates = d["test_dates"]
+        returns = d["y_test_raw"]
+        tickers = d["tickers"]
+
+        unique_dates = np.unique(dates)
+        daily_details = []
+
+        for date_val in unique_dates:
+            mask = dates == date_val
+            day_elite = elite & mask
+            n_elite = int(day_elite.sum())
+
+            if n_elite < min_pool:
+                continue
+
+            idx = np.where(day_elite)[0]
+            elite_cumsum = np.cumsum(elite)
+            ltr_idx = np.array([int(elite_cumsum[i]) - 1 for i in idx])
+
+            day_ltr = ltr_scores[ltr_idx]
+            day_proba = y_proba[idx]
+            day_ret = returns[idx]
+            day_tick = tickers[idx]
+
+            p_mu, p_sig = day_proba.mean(), day_proba.std()
+            day_cls_z = (day_proba - p_mu) / p_sig if p_sig > 1e-8 else np.zeros_like(day_proba)
+            l_mu, l_sig = day_ltr.mean(), day_ltr.std()
+            day_ltr_z = (day_ltr - l_mu) / l_sig if l_sig > 1e-8 else np.zeros_like(day_ltr)
+
+            scores = np.maximum(day_cls_z, 0) * np.maximum(day_ltr_z, 0)
+            top10 = np.argsort(scores)[-10:][::-1]
+            t10_ret = day_ret[top10]
+            hits = int((t10_ret >= ret_threshold).sum())
+
+            picks = []
+            for rank, ti in enumerate(top10, 1):
+                actual_ret = float(day_ret[ti])
+                picks.append({
+                    "rank": rank,
+                    "ticker": day_tick[ti],
+                    "actual_return": actual_ret,
+                    "hit": actual_ret >= ret_threshold,
+                })
+
+            daily_details.append({
+                "date": pd.Timestamp(date_val).strftime("%Y-%m-%d"),
+                "pool": n_elite,
+                "hits": hits,
+                "avg_return": float(t10_ret.mean()),
+                "picks": picks,
+            })
+
+        n_days = len(daily_details)
+        total_hits = sum(dd["hits"] for dd in daily_details)
+        total_picks = n_days * 10
+        hit_rate = total_hits / total_picks if total_picks > 0 else 0
+
+        fold_result = {
+            "fold": fold_idx,
+            "n_days": n_days,
+            "hit_rate": hit_rate,
+            "total_hits": total_hits,
+            "total_picks": total_picks,
+            "details": daily_details,
+        }
+        all_results.append(fold_result)
+
+        # Build output lines
+        output_lines.append(f"{'=' * 80}")
+        output_lines.append(f"FOLD {fold_idx} — Pool >= {min_pool} | {n_days} days | Hit rate: {hit_rate:.1%}")
+        output_lines.append(f"{'=' * 80}")
+        for dd in daily_details:
+            date_str = dd["date"]
+            pool = dd["pool"]
+            hits = dd["hits"]
+            picks_str = ", ".join(
+                f"{p['ticker']} ({p['actual_return']:.0%})" for p in dd["picks"]
+            )
+            output_lines.append(f"  {date_str} | Pool {pool} | {hits}/10 hits | {picks_str}")
+        output_lines.append("")
+
+    # Aggregate
+    agg_days = sum(r["n_days"] for r in all_results)
+    agg_hits = sum(r["total_hits"] for r in all_results)
+    agg_picks = sum(r["total_picks"] for r in all_results)
+    agg_hit_rate = agg_hits / agg_picks if agg_picks > 0 else 0
+
+    output_lines.append(f"{'=' * 80}")
+    output_lines.append(f"AGGREGATE — Pool >= {min_pool}")
+    output_lines.append(f"{'=' * 80}")
+    for r in all_results:
+        output_lines.append(
+            f"  Fold {r['fold']}: {r['n_days']} days, "
+            f"Hit rate: {r['hit_rate']:.1%} ({r['total_hits']}/{r['total_picks']})"
+        )
+    output_lines.append(f"\n  Total: {agg_days} days, {agg_hits}/{agg_picks} hits ({agg_hit_rate:.1%})")
+
+    full_text = "\n".join(output_lines)
+
+    if output_file:
+        Path(output_file).write_text(full_text)
+        logger.info("Wrote fold evaluation to %s", output_file)
+
+    return {
+        "min_pool": min_pool,
+        "folds": all_results,
+        "aggregate_days": agg_days,
+        "aggregate_hits": agg_hits,
+        "aggregate_picks": agg_picks,
+        "aggregate_hit_rate": agg_hit_rate,
+        "text": full_text,
+    }
 
 
 # ---------------------------------------------------------------------------
