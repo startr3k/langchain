@@ -1040,6 +1040,10 @@ class StockReturnPredictor:
             # Save intermediates for post-retrain evaluation at different pool thresholds
             import pickle as _pkl
             _inter_dir = Path(__file__).resolve().parent.parent.parent / "intermediates"
+            if fold_idx == 0:
+                if _inter_dir.exists():
+                    for old_pkl in _inter_dir.glob("fold*.pkl"):
+                        old_pkl.unlink()
             _inter_dir.mkdir(exist_ok=True)
             _fold_data = {
                 "y_proba_test": y_proba_pos,
