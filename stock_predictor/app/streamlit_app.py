@@ -34,7 +34,12 @@ from stock_predictor.pipeline.daily_picks import (
     evaluate_ground_truth,
     get_precision_over_time,
     DEFAULT_CSV_PATH,
+    CSV_COLUMNS,
 )
+
+# Separate CSV for Top Recommendations (always written, regardless of pool size).
+# The scheduler's daily_picks.csv is only written when pool >= 75.
+TOP_RECS_CSV_PATH = Path(DEFAULT_CSV_PATH).parent / "top_recommendations.csv"
 from stock_predictor.pipeline.scheduler import (
     get_schedule_config,
     schedule_pipeline,
@@ -155,23 +160,26 @@ if page == "Top Recommendations":
         else:
             return f"{v:.1f}"
 
-    # ── Helper: load today's picks from the daily_picks CSV ──────────
+    # ── Helper: load today's picks from the top_recommendations CSV ─
     def _load_todays_picks() -> pd.DataFrame | None:
-        """Return today's picks from the CSV, or None if not available."""
+        """Return today's picks from the top_recommendations CSV,
+        falling back to the scheduler's daily_picks CSV."""
         from datetime import date as _date
 
-        csv_path = Path(DEFAULT_CSV_PATH)
-        if not csv_path.exists():
-            return None
-        try:
-            df = pd.read_csv(csv_path)
-            today_str = _date.today().isoformat()
-            today_df = df[df["date"] == today_str]
-            if today_df.empty:
-                return None
-            return today_df
-        except Exception:
-            return None
+        today_str = _date.today().isoformat()
+
+        # Try top_recommendations.csv first (always written by this page)
+        for csv_path in [TOP_RECS_CSV_PATH, Path(DEFAULT_CSV_PATH)]:
+            if not csv_path.exists():
+                continue
+            try:
+                df = pd.read_csv(csv_path)
+                today_df = df[df["date"] == today_str]
+                if not today_df.empty:
+                    return today_df
+            except Exception:
+                continue
+        return None
 
     # ── Helper: convert CSV rows → display-friendly dicts ────────────
     def _csv_rows_to_results(df: pd.DataFrame, top_x: int) -> list[dict]:
@@ -266,17 +274,16 @@ if page == "Top Recommendations":
 
     if regenerate:
         from datetime import date as _date
-        from stock_predictor.models.automl_model import MIN_ELITE_POOL
 
-        csv_path = Path(DEFAULT_CSV_PATH)
         today_str = _date.today().isoformat()
+        recs_csv = TOP_RECS_CSV_PATH
 
         with st.spinner(
             "Re-running daily picks pipeline on NASDAQ universe..."
         ):
             try:
                 # Always generate picks for display (save_to_csv=False
-                # bypasses the pool-size gate and CSV caching).
+                # bypasses the pool-size gate and scheduler CSV caching).
                 new_picks = run_daily_picks(
                     top_k=max(top_x, 10),
                     save_to_csv=False,
@@ -290,23 +297,27 @@ if page == "Top Recommendations":
 
                     pool_size = int(new_picks["elite_pool_size"].iloc[0]) if "elite_pool_size" in new_picks.columns else 0
 
-                    # Only update the scheduler CSV when pool >= 75
-                    if pool_size >= MIN_ELITE_POOL:
-                        # Remove today's old rows, write new ones
-                        if csv_path.exists():
-                            try:
-                                existing = pd.read_csv(csv_path)
-                                cleaned = existing[existing["date"] != today_str]
-                                cleaned.to_csv(csv_path, index=False)
-                            except Exception:
-                                pass
-                        new_picks.to_csv(csv_path, mode="a", header=not csv_path.exists(), index=False)
-                        st.success(f"Regenerated {len(today_picks)} picks! (pool={pool_size}, saved to CSV)")
+                    # Always save to top_recommendations.csv
+                    # (regardless of pool size — this is separate from
+                    # the scheduler's daily_picks.csv)
+                    if recs_csv.exists():
+                        try:
+                            existing = pd.read_csv(recs_csv)
+                            cleaned = existing[existing["date"] != today_str]
+                            cleaned.to_csv(recs_csv, index=False)
+                        except Exception:
+                            pass
                     else:
-                        st.success(
-                            f"Regenerated {len(today_picks)} picks for display. "
-                            f"Pool size {pool_size} < {MIN_ELITE_POOL} — not saved to scheduler CSV."
-                        )
+                        recs_csv.parent.mkdir(parents=True, exist_ok=True)
+                    new_picks.reindex(columns=CSV_COLUMNS).to_csv(
+                        recs_csv, mode="a",
+                        header=not recs_csv.exists(),
+                        index=False,
+                    )
+                    st.success(
+                        f"Regenerated {len(today_picks)} picks! "
+                        f"(pool={pool_size}, saved to top_recommendations.csv)"
+                    )
                 else:
                     st.warning("Pipeline produced no picks.")
             except Exception as e:
