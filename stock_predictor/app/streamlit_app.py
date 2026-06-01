@@ -221,14 +221,18 @@ if page == "Top Recommendations":
     from_pipeline = False
 
     if regenerate:
-        # Delete today's stale entries and re-run the pipeline
         from datetime import date as _date
 
         csv_path = Path(DEFAULT_CSV_PATH)
+        today_str = _date.today().isoformat()
+
+        # Remove today's rows so run_daily_picks doesn't hit the
+        # "already recorded" cache, then re-run the pipeline.
+        old_rows = None
         if csv_path.exists():
             try:
                 existing = pd.read_csv(csv_path)
-                today_str = _date.today().isoformat()
+                old_rows = existing[existing["date"] == today_str]
                 cleaned = existing[existing["date"] != today_str]
                 cleaned.to_csv(csv_path, index=False)
             except Exception:
@@ -246,8 +250,25 @@ if page == "Top Recommendations":
                     from_pipeline = True
                     st.success(f"Regenerated {len(today_picks)} picks!")
                 else:
-                    st.warning("Pipeline returned 0 picks.")
+                    # Pool < 75 or no picks — restore old cached rows
+                    if old_rows is not None and not old_rows.empty:
+                        old_rows.to_csv(csv_path, mode="a", header=False, index=False)
+                        today_picks = old_rows
+                        st.warning(
+                            "Elite pool < 75 — weak signal day. "
+                            "Keeping previous cached picks."
+                        )
+                    else:
+                        st.warning(
+                            "Elite pool < 75 — weak signal day. No picks recorded."
+                        )
             except Exception as e:
+                # Restore old rows on error too
+                if old_rows is not None and not old_rows.empty:
+                    try:
+                        old_rows.to_csv(csv_path, mode="a", header=False, index=False)
+                    except Exception:
+                        pass
                 st.error(f"Pipeline error: {e}")
 
     if today_picks is not None and not results:
