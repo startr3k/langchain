@@ -352,20 +352,9 @@ if page == "Top Recommendations":
         ticker = r["Ticker"]
         if ticker in hot_tickers:
             row["Ticker"] = f"🔥 {ticker}"
-            buzz = buzz_data.get(ticker, {})
-            row["Social Buzz"] = buzz.get("sentiment_label", "Hot")
-        else:
-            row["Social Buzz"] = "—"
         display_top.append(row)
 
     df = pd.DataFrame(display_top)
-    # Reorder columns: Ticker, Social Buzz, then the rest
-    cols = df.columns.tolist()
-    if "Social Buzz" in cols:
-        cols.remove("Social Buzz")
-        ticker_idx = cols.index("Ticker") + 1
-        cols.insert(ticker_idx, "Social Buzz")
-        df = df[cols]
 
     # Show elite pool size banner if available
     pool_sizes = [r.get("Elite Pool Size", 0) for r in top_results]
