@@ -816,14 +816,14 @@ class StockReturnPredictor:
             "seed": 42,
         }
 
-        # LTR (LambdaMART) params — tuned to reduce overfitting
+        # LTR (LambdaMART) params
         ltr_params = {
             "objective": "rank:ndcg",
             "eval_metric": "ndcg@10",
-            "max_depth": 4,
-            "learning_rate": 0.03,
-            "min_child_weight": 100,
-            "subsample": 0.5,
+            "max_depth": 6,
+            "learning_rate": 0.05,
+            "min_child_weight": 50,
+            "subsample": 0.7,
             "colsample_bytree": 0.5,
             "reg_alpha": 5.0,
             "reg_lambda": 10.0,
@@ -1020,10 +1020,10 @@ class StockReturnPredictor:
 
                 ltr_evals: dict = {}
                 fold_ltr_model = xgb.train(
-                    ltr_params, dtrain_ltr, num_boost_round=200,
+                    ltr_params, dtrain_ltr, num_boost_round=500,
                     evals=[(dtrain_ltr, "train"), (dtest_ltr, "test")],
                     evals_result=ltr_evals,
-                    early_stopping_rounds=30,
+                    early_stopping_rounds=50,
                     verbose_eval=False,
                 )
                 ltr_ndcg_train = ltr_evals["train"]["ndcg@10"][-1]
