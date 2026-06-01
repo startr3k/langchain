@@ -1547,7 +1547,7 @@ elif page == "Model Explanations":
 
                         _bee_df = pd.DataFrame(_bee_rows)
                         # Map feature names to numeric y positions + jitter
-                        _ordered_feats = [_feat_names[i] for i in _top_idx]
+                        _ordered_feats = [_feat_names[i] for i in _top_idx][::-1]
                         _feat_to_y = {f: i for i, f in enumerate(_ordered_feats)}
                         _bee_df["_y"] = _bee_df["Feature"].map(_feat_to_y)
                         _bee_df["_y_jitter"] = _bee_df["_y"] + _np.random.default_rng(42).uniform(
