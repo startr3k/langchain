@@ -9,9 +9,11 @@ Features:
 - Insider transactions (Form 4)
 - Target: Forward_Max_Return_3M (>=20%)
 
-Only includes tickers with market cap >= $100M.
+Fetches the full NASDAQ-listed ticker universe from the NASDAQ API and
+filters by market cap (default $500M).  Pass ``--min-mcap`` to override.
 """
 
+import argparse
 import json
 import logging
 import os
@@ -33,7 +35,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from stock_predictor.data.yfinance_client import get_stock_data, compute_technical_features
+from stock_predictor.data.yfinance_client import (
+    get_stock_data,
+    compute_technical_features,
+    fetch_all_nasdaq_tickers,
+)
 from stock_predictor.data.macro_data import get_macro_data, align_macro_to_dates
 from stock_predictor.data.feature_engineering import TECHNICAL_FEATURES
 
@@ -95,18 +101,26 @@ def compute_forward_return(close_prices: np.ndarray, window: int = 63) -> np.nda
 
 
 def main():
-    # Load tickers with market cap >= $100M
-    if not os.path.exists(MCAP_CACHE_FILE):
-        logger.error("No market cap cache found. Run market cap filter first.")
-        return
+    parser = argparse.ArgumentParser(description="Generate 10-year training dataset")
+    parser.add_argument(
+        "--min-mcap",
+        type=int,
+        default=500_000_000,
+        help="Minimum market cap in USD (default: 500000000 = $500M)",
+    )
+    args = parser.parse_args()
 
-    with open(MCAP_CACHE_FILE) as f:
-        mcap_cache = json.load(f)
-    tickers = sorted([
-        t for t, mc in mcap_cache.items()
-        if (mc or 0) >= 100_000_000
-    ])
-    logger.info("Loaded %d tickers with market cap >= $100M", len(tickers))
+    # Fetch full NASDAQ ticker list and filter by market cap
+    logger.info("Fetching full NASDAQ ticker universe...")
+    tickers = fetch_all_nasdaq_tickers(
+        min_market_cap=args.min_mcap,
+        cache_path=MCAP_CACHE_FILE,
+    )
+    logger.info(
+        "Using %d tickers with market cap >= $%dM",
+        len(tickers),
+        args.min_mcap // 1_000_000,
+    )
 
     # Load CIK map for EDGAR
     cik_map = load_cik_map()

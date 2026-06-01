@@ -3,14 +3,127 @@
 from __future__ import annotations
 
 import logging
+import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+# Regex for valid ticker symbols (1-5 uppercase letters, optional dot/hyphen suffix)
+_TICKER_RE = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?(-[A-Z]{1,2})?$")
+
+
+def fetch_all_nasdaq_tickers(
+    min_market_cap: int = 500_000_000,
+    cache_path: str | None = None,
+) -> list[str]:
+    """Fetch the full NASDAQ-listed ticker universe from the NASDAQ API.
+
+    Args:
+        min_market_cap: Minimum market cap in USD to include.  Defaults to
+            $500M for institutional-grade liquidity.
+        cache_path: If provided, write the market cap cache to this JSON file
+            so future runs can resume without re-fetching.
+
+    Returns:
+        Sorted list of ticker symbols passing the market cap filter.
+    """
+    import json
+
+    headers = {"User-Agent": "Mozilla/5.0 (StockPredictor/1.0)"}
+
+    # ── Step 1: Get all NASDAQ-listed symbols from the NASDAQ screener API ──
+    all_symbols: set[str] = set()
+    try:
+        resp = requests.get(
+            "https://api.nasdaq.com/api/screener/stocks"
+            "?tableType=traded&exchange=nasdaq&limit=10000",
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        rows = resp.json()["data"]["table"]["rows"]
+        for r in rows:
+            sym = r["symbol"].strip()
+            if _TICKER_RE.match(sym):
+                all_symbols.add(sym)
+        logger.info("NASDAQ API returned %d valid tickers", len(all_symbols))
+    except Exception:
+        logger.warning("NASDAQ API failed — falling back to Wikipedia + hardcoded list")
+        all_symbols = set(NASDAQ_TOP_TICKERS)
+
+    if not all_symbols:
+        logger.warning("No tickers fetched — using NASDAQ_TOP_TICKERS fallback")
+        all_symbols = set(NASDAQ_TOP_TICKERS)
+
+    # ── Step 2: Filter by market cap via yFinance ──
+    logger.info(
+        "Filtering %d tickers by market cap >= $%dM...",
+        len(all_symbols),
+        min_market_cap // 1_000_000,
+    )
+    mcap_cache: dict[str, int | None] = {}
+
+    # Load existing cache if available
+    if cache_path:
+        try:
+            with open(cache_path) as f:
+                mcap_cache = json.load(f)
+            logger.info("Loaded %d entries from existing market cap cache", len(mcap_cache))
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    # Fetch market cap for new tickers AND retry previously failed ones (None)
+    failed_syms = {k for k, v in mcap_cache.items() if v is None}
+    to_fetch = sorted((all_symbols - set(mcap_cache.keys())) | (all_symbols & failed_syms))
+    if failed_syms & all_symbols:
+        logger.info("Retrying %d previously failed tickers", len(failed_syms & all_symbols))
+    logger.info("Need market cap for %d tickers", len(to_fetch))
+
+    for i, sym in enumerate(to_fetch):
+        try:
+            info = yf.Ticker(sym).info
+            mcap_cache[sym] = info.get("marketCap", 0) or 0
+        except Exception:
+            mcap_cache[sym] = None
+        if (i + 1) % 10 == 0:
+            time.sleep(0.5)  # rate limit — brief pause every 10 tickers
+        if (i + 1) % 50 == 0:
+            logger.info("Market cap progress: %d / %d", i + 1, len(to_fetch))
+            # Checkpoint the cache
+            if cache_path:
+                try:
+                    with open(cache_path, "w") as f:
+                        json.dump(mcap_cache, f, indent=2)
+                except Exception:
+                    pass
+
+    # Save final cache
+    if cache_path:
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(mcap_cache, f, indent=2)
+            logger.info("Saved market cap cache to %s", cache_path)
+        except Exception:
+            logger.warning("Could not save market cap cache")
+
+    filtered = sorted(
+        sym
+        for sym in all_symbols
+        if (mcap_cache.get(sym) or 0) >= min_market_cap
+    )
+    logger.info(
+        "Filtered to %d tickers with market cap >= $%dM",
+        len(filtered),
+        min_market_cap // 1_000_000,
+    )
+    return filtered
 
 NASDAQ_TOP_TICKERS = [
     "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "AVGO",
