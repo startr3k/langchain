@@ -72,9 +72,6 @@ _SEMANTIC_NAN_FILLS: dict[str, float] = {
     "hist_net_income": 0.0,
     "hist_operating_income": 0.0,
     "hist_diluted_eps": 0.0,
-    # Earnings surprise → 0.0 when there are no earnings to beat/miss
-    "earnings_surprise_pct": 0.0,
-    "earnings_eps_actual": 0.0,
 }
 
 
@@ -99,14 +96,9 @@ _LOG_TRANSFORM_FEATURES = [
     "hist_operating_income",
     "hist_net_income",
     "hist_total_assets",
-    "hist_total_debt",
     "hist_stockholders_equity",
-    "hist_book_value_per_share",
-    "hist_current_assets",
     "hist_capex",
     "hist_diluted_eps",
-    "earnings_eps_actual",
-    "sec_net_income",
     "sec_operating_cash_flow",
 ]
 
@@ -154,7 +146,7 @@ FEATURE_GROUPS: dict[str, list[str]] = {
         "treasury_3m", "yield_curve_spread",
     ],
     "Insider Activity": [
-        "insider_net_buys_90d", "insider_total_transactions_90d",
+        "insider_net_buys_90d",
     ],
 
 }
@@ -163,20 +155,10 @@ FEATURE_GROUPS: dict[str, list[str]] = {
 def _compute_derived_features(df: pd.DataFrame) -> pd.DataFrame:
     """Compute interaction / derived features from existing columns.
 
-    These features combine multiple raw signals into higher-level
-    indicators that capture multi-factor breakout patterns.
+    Currently a no-op — Fundamental_Surprise was removed because its
+    input (earnings_surprise_pct) is not present in the training CSV.
+    Kept as a hook for future derived features.
     """
-    # Fundamental surprise: companies beating estimates while growing.
-    # Uses earnings growth (not revenue growth, which was dropped for
-    # negative permutation importance).
-    # Fill NaN with 0 (no surprise) instead of propagating NaN from parents.
-    if "hist_earnings_growth_qoq" in df.columns and "earnings_surprise_pct" in df.columns:
-        df["Fundamental_Surprise"] = (
-            df["hist_earnings_growth_qoq"].fillna(0) * df["earnings_surprise_pct"].fillna(0)
-        )
-    else:
-        df["Fundamental_Surprise"] = 0.0
-
     return df
 
 
@@ -1661,8 +1643,6 @@ class StockReturnPredictor:
             if col not in df.columns:
                 df[col] = 0.0
         df = df[self.feature_names]
-        df = _fill_semantic_nan(df)
-        df = _log_transform(df)
         if self.feature_medians is not None:
             df = df.fillna(self.feature_medians)
         else:
@@ -2209,8 +2189,6 @@ class StockReturnPredictor:
             if col not in df.columns:
                 df[col] = 0.0
         df = df[self.feature_names]
-        df = _fill_semantic_nan(df)
-        df = _log_transform(df)
         if self.feature_medians is not None:
             df = df.fillna(self.feature_medians)
         else:
