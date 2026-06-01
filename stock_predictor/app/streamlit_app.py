@@ -146,6 +146,8 @@ if page == "Top Recommendations":
             v = float(val)
         except (TypeError, ValueError):
             return "N/A"
+        if pd.isna(v):
+            return "N/A"
         if v >= 70:
             return f"{v:.1f} (Overbought)"
         elif v <= 30:

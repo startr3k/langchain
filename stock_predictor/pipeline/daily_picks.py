@@ -160,12 +160,12 @@ def run_daily_picks(
             "regime_confidence": round(r.get("regime_confidence", 0.5), 4),
             "ticker_calibration": round(r.get("ticker_calibration", 1.0), 4),
             "volatility_20d": round(r.get("volatility_20d", 0), 4) if r.get("volatility_20d") else None,
-            "rsi_14": round(r.get("rsi_14", 0), 2) if r.get("rsi_14") else None,
             "sentiment_score": round(sentiment_score, 4),
             "sentiment_mentions": sentiment_mentions,
             "shap_top_features": shap_str,
             "market_cap": market_cap,
             "sector": sector,
+            "rsi_14": round(r.get("rsi_14", 0), 2) if r.get("rsi_14") else None,
             "max_upside_pct": None,
             "hit_20pct": None,
             "ground_truth_date": None,
@@ -173,6 +173,8 @@ def run_daily_picks(
         rows.append(row)
 
     df_new = pd.DataFrame(rows)
+    # Ensure column order matches CSV_COLUMNS to prevent data corruption
+    df_new = df_new.reindex(columns=CSV_COLUMNS)
 
     # Only write to CSV when save_to_csv=True and pool gate passed
     if save_to_csv:
