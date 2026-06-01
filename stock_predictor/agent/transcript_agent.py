@@ -222,8 +222,13 @@ def fetch_latest_transcript(ticker: str) -> dict:
                     "source_url": source_url,
                 }
 
-    # No transcript found — try EFTS full-text search as fallback
-    return _efts_fallback(ticker, cik)
+    # Fallback 1: EFTS full-text search
+    efts_result = _efts_fallback(ticker, cik)
+    if efts_result.get("found"):
+        return efts_result
+
+    # Fallback 2: Motley Fool transcript scraping
+    return _fool_fallback(ticker)
 
 
 def _efts_fallback(ticker: str, cik: str) -> dict:
@@ -283,16 +288,102 @@ def _efts_fallback(ticker: str, cik: str) -> dict:
             except Exception:
                 pass
 
+        return {"ticker": ticker, "found": False, "error": "EFTS: could not download"}
+    except Exception as e:
+        return {"ticker": ticker, "found": False, "error": f"EFTS error: {e}"}
+
+
+def _fool_fallback(ticker: str) -> dict:
+    """Scrape the latest earnings call transcript from Motley Fool."""
+    try:
+        # Use web search to find the Fool transcript URL for this ticker
+        search_url = (
+            f"https://www.google.com/search?q=site:fool.com+"
+            f"{ticker.lower()}+earnings+call+transcript+2026"
+        )
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+        resp = requests.get(search_url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            return {
+                "ticker": ticker,
+                "found": False,
+                "error": f"No transcript found for {ticker} (EDGAR + Fool)",
+            }
+
+        # Parse Google results for fool.com transcript links
+        soup = BeautifulSoup(resp.text, "html.parser")
+        fool_url = None
+        for a_tag in soup.find_all("a", href=True):
+            href = a_tag["href"]
+            if "fool.com/earnings/call-transcripts/" in href:
+                # Extract the actual URL from Google's redirect
+                if "/url?q=" in href:
+                    href = href.split("/url?q=")[1].split("&")[0]
+                fool_url = href
+                break
+
+        if not fool_url:
+            return {
+                "ticker": ticker,
+                "found": False,
+                "error": f"No transcript found for {ticker} (EDGAR + Fool)",
+            }
+
+        # Fetch the Fool transcript page
+        resp2 = requests.get(fool_url, headers=headers, timeout=30)
+        if resp2.status_code != 200:
+            return {
+                "ticker": ticker,
+                "found": False,
+                "error": f"Could not fetch Fool transcript (HTTP {resp2.status_code})",
+            }
+
+        soup2 = BeautifulSoup(resp2.text, "html.parser")
+
+        # Extract transcript text from the page
+        # Try article body first, then full page
+        article = soup2.find("article")
+        if article:
+            text = article.get_text(separator="\n", strip=True)
+        else:
+            # Remove nav, header, footer elements
+            for tag in soup2.find_all(["nav", "header", "footer", "script", "style"]):
+                tag.decompose()
+            text = soup2.get_text(separator="\n", strip=True)
+
+        if len(text) < 200:
+            return {
+                "ticker": ticker,
+                "found": False,
+                "error": f"Fool transcript page too short ({len(text)} chars)",
+            }
+
+        # Extract date from URL (YYYY/MM/DD pattern)
+        import re as _re
+        date_match = _re.search(r"/(\d{4}/\d{2}/\d{2})/", fool_url)
+        date_str = date_match.group(1).replace("/", "-") if date_match else ""
+
+        if len(text) > 15000:
+            text = text[:15000] + "\n\n[... transcript truncated ...]"
+
         return {
             "ticker": ticker,
-            "found": False,
-            "error": f"Found EFTS hit but could not download transcript for {ticker}",
+            "found": True,
+            "date": date_str,
+            "text": text,
+            "source_url": fool_url,
         }
     except Exception as e:
+        logger.debug("Fool fallback failed for %s: %s", ticker, e)
         return {
             "ticker": ticker,
             "found": False,
-            "error": f"EFTS search error: {e}",
+            "error": f"No transcript found for {ticker} (EDGAR + Fool: {e})",
         }
 
 
