@@ -541,12 +541,13 @@ def build_incremental_dataset(
 
             if cutoff is not None:
                 # Fast path: skip tickers whose data is already up to date.
-                # The 63-day target window makes the latest *usable* row
-                # ~63 trading days before the last price date, so any
-                # ticker whose max date is within the last 2 calendar days
-                # cannot possibly produce new training rows.
+                # The TARGET_COLUMN is NaN'd for the last 63 trading days
+                # (~90 calendar days), so the max _date in the CSV is always
+                # ~90 calendar days behind the latest price date.  New valid
+                # training rows can only appear when today > cutoff + 93 days
+                # (90 + margin for weekends/holidays).
                 days_stale = (today - cutoff).days
-                if days_stale <= 2:
+                if days_stale <= 93:
                     skipped += 1
                     continue
 
