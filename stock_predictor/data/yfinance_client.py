@@ -27,20 +27,28 @@ def get_stock_data(
     ticker: str,
     period: str = "2y",
     interval: str = "1d",
+    start: str | None = None,
 ) -> pd.DataFrame:
     """Fetch historical stock data from YFinance.
 
     Args:
         ticker: Stock ticker symbol.
-        period: Data period (e.g. '1y', '2y', '5y').
+        period: Data period (e.g. '1y', '2y', '5y'). Ignored when *start* is set.
         interval: Data interval (e.g. '1d', '1wk').
+        start: Optional start date (YYYY-MM-DD).  When provided, ``period``
+            is ignored and data is fetched from *start* to today.
 
     Returns:
         DataFrame with OHLCV data and computed features.
     """
-    logger.info("Fetching stock data for %s (period=%s)", ticker, period)
-    stock = yf.Ticker(ticker)
-    df = stock.history(period=period, interval=interval)
+    if start is not None:
+        logger.info("Fetching stock data for %s (start=%s)", ticker, start)
+        stock = yf.Ticker(ticker)
+        df = stock.history(start=start, interval=interval)
+    else:
+        logger.info("Fetching stock data for %s (period=%s)", ticker, period)
+        stock = yf.Ticker(ticker)
+        df = stock.history(period=period, interval=interval)
     if df.empty:
         logger.warning("No data returned for %s", ticker)
         return df
