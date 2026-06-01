@@ -28,7 +28,7 @@ from stock_predictor.data.sentiment import (
     get_sentiment_summary,
     get_trending_tickers_from_social,
 )
-from stock_predictor.data.yfinance_client import get_stock_data, get_stock_info, NASDAQ_TOP_TICKERS
+from stock_predictor.data.yfinance_client import get_stock_data, get_stock_info
 from stock_predictor.models.automl_model import StockReturnPredictor
 from stock_predictor.pipeline.daily_picks import (
     run_daily_picks,
@@ -2065,7 +2065,8 @@ elif page == "Daily Picks Pipeline":
                     )
             else:
                 # ── Full build (no existing CSV) ──
-                from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS as _tickers
+                from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
+                _tickers = fetch_all_nasdaq_tickers()
                 status.info("Step 1/4: No existing dataset — building full training data...")
                 progress.progress(5)
                 combined = build_training_dataset(_tickers, include_sentiment=False)

@@ -648,15 +648,28 @@ def _slow_scan_tickers(
     *,
     top_k: int = 10,
 ) -> list[dict]:
-    """Fallback: scan tickers one-by-one via yFinance (slow)."""
-    from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
+    """Fallback: scan tickers one-by-one via yFinance (slow).
 
-    tickers_to_scan: list[str] = list(NASDAQ_TOP_TICKERS)
-    try:
-        sp500 = _get_major_index_tickers()
-        tickers_to_scan = list(set(tickers_to_scan) | set(sp500))
-    except Exception:
-        logger.warning("Could not fetch index tickers, using NASDAQ list only")
+    Ticker source priority:
+      1. Training CSV (all tickers already in the dataset)
+      2. ``fetch_all_nasdaq_tickers()`` (full NASDAQ universe)
+    """
+    tickers_to_scan: list[str] = []
+
+    # Try training CSV first
+    if _TRAINING_CSV_PATH.exists():
+        try:
+            _df = pd.read_csv(_TRAINING_CSV_PATH, usecols=["Ticker"])
+            tickers_to_scan = sorted(_df["Ticker"].dropna().unique().tolist())
+            logger.info("Slow scan: loaded %d tickers from training CSV", len(tickers_to_scan))
+        except Exception:
+            pass
+
+    # Fallback to full NASDAQ universe
+    if not tickers_to_scan:
+        from stock_predictor.data.yfinance_client import fetch_all_nasdaq_tickers
+        tickers_to_scan = fetch_all_nasdaq_tickers()
+        logger.info("Slow scan: fetched %d tickers from NASDAQ API", len(tickers_to_scan))
 
     logger.info("Slow scan: %d tickers via yFinance...", len(tickers_to_scan))
 
