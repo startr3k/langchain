@@ -20,6 +20,7 @@ from stock_predictor.agent.agent import run_agent
 from stock_predictor.data.feature_engineering import (
     ALL_FEATURE_NAMES,
     TARGET_COLUMN,
+    build_incremental_dataset,
     build_training_dataset,
 )
 from stock_predictor.data.sentiment import (
@@ -1986,9 +1987,10 @@ elif page == "Daily Picks Pipeline":
     st.markdown("---")
     st.subheader("🔄 Retrain Model")
     st.markdown(
-        "Retrain the model with an extended dataset. Creates a new "
-        "`training_data_extended.csv` (fresh 10y data merged with the "
-        "original full dataset) — does NOT overwrite `training_data_10y_full.csv`."
+        "Retrain the model with an extended dataset. **Incremental mode** "
+        "only downloads new rows since the last training date — existing "
+        "data is kept as-is. Saves to `training_data_extended.csv` "
+        "(does NOT overwrite `training_data_10y_full.csv`)."
     )
 
     retrain_col1, retrain_col2 = st.columns(2)
@@ -2008,40 +2010,51 @@ elif page == "Daily Picks Pipeline":
         status = st.empty()
 
         try:
-            # Step 1: Generate fresh 10y data
-            status.info("Step 1/4: Building fresh 10-year training dataset...")
-            progress.progress(5)
-
             from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS as _tickers
-            from stock_predictor.data.feature_engineering import build_training_dataset
 
-            fresh_df = build_training_dataset(_tickers, include_sentiment=False)
-            progress.progress(20)
-            status.info(f"Fresh data: {len(fresh_df)} rows, {fresh_df['Ticker'].nunique()} tickers")
+            # Use extended CSV if it already exists (previous retrain), else original
+            _base_csv = _extended_csv if _extended_csv.exists() else _original_csv
 
-            # Step 2: Load original full dataset and merge
-            status.info("Step 2/4: Merging with original full dataset...")
-            progress.progress(30)
+            if _base_csv.exists():
+                # ── Incremental mode ──
+                status.info(f"Step 1/4: Loading existing dataset from {_base_csv.name}...")
+                progress.progress(5)
 
-            if _original_csv.exists():
-                original_df = pd.read_csv(_original_csv)
+                original_df = pd.read_csv(_base_csv)
                 original_df["_date"] = pd.to_datetime(original_df["_date"])
-                fresh_df["_date"] = pd.to_datetime(fresh_df["_date"])
-
-                # Combine: original data + any new rows from fresh data
-                # Keep original rows where they overlap, add fresh rows for new dates/tickers
-                combined = pd.concat([original_df, fresh_df], ignore_index=True)
-                combined = combined.drop_duplicates(subset=["Ticker", "_date"], keep="first")
-                combined = combined.sort_values(["Ticker", "_date"]).reset_index(drop=True)
-
+                _max_date = original_df["_date"].max()
                 status.info(
-                    f"Extended dataset: {len(combined)} rows "
-                    f"(original: {len(original_df)}, fresh: {len(fresh_df)}, "
-                    f"merged: {len(combined)})"
+                    f"Existing data: {len(original_df):,} rows, "
+                    f"{original_df['Ticker'].nunique()} tickers, "
+                    f"latest date: {_max_date.date()}"
                 )
+
+                status.info("Step 2/4: Fetching new data incrementally...")
+                progress.progress(10)
+
+                new_rows_df = build_incremental_dataset(_tickers, original_df)
+                progress.progress(25)
+
+                if new_rows_df.empty:
+                    status.info("No new rows to add — dataset is already up to date.")
+                    combined = original_df
+                else:
+                    new_rows_df["_date"] = pd.to_datetime(new_rows_df["_date"])
+                    combined = pd.concat([original_df, new_rows_df], ignore_index=True)
+                    combined = combined.drop_duplicates(subset=["Ticker", "_date"], keep="first")
+                    combined = combined.sort_values(["Ticker", "_date"]).reset_index(drop=True)
+
+                    status.info(
+                        f"Extended dataset: {len(combined):,} rows "
+                        f"(+{len(new_rows_df):,} new rows from incremental fetch)"
+                    )
             else:
-                combined = fresh_df
-                status.warning("Original training CSV not found — using fresh data only.")
+                # ── Full build (no existing CSV) ──
+                status.info("Step 1/4: No existing dataset — building full training data...")
+                progress.progress(5)
+                combined = build_training_dataset(_tickers, include_sentiment=False)
+                progress.progress(25)
+                status.info(f"Built {len(combined):,} rows, {combined['Ticker'].nunique()} tickers")
 
             # Step 3: Save extended dataset (NOT overwriting original)
             combined.to_csv(_extended_csv, index=False)

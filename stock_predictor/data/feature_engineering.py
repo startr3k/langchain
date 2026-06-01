@@ -479,3 +479,230 @@ def build_training_dataset(
         len(result), len(result.columns) - 2,  # minus Ticker and target
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Incremental dataset builder
+# ---------------------------------------------------------------------------
+
+# Number of calendar days of lookback needed for technical indicator warmup.
+# SMA_200 requires ~200 trading days ≈ 290 calendar days.  We add margin.
+_LOOKBACK_CALENDAR_DAYS = 350
+
+
+def build_incremental_dataset(
+    tickers: list[str],
+    existing_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fetch only new rows that are not already in *existing_df*.
+
+    Instead of re-downloading the full history for every ticker, this
+    function:
+    1. Finds the latest ``_date`` **per ticker** in *existing_df*.
+    2. Fetches price data starting from ``max_date - lookback`` (to warm
+       up rolling technical indicators like SMA_200).
+    3. Generates training rows only for dates **after** the ticker's
+       existing max date.
+
+    Tickers that are entirely absent from *existing_df* are fetched in
+    full (``period="3y"``).
+
+    Args:
+        tickers: List of ticker symbols.
+        existing_df: The current training CSV loaded as a DataFrame.  Must
+            contain at least ``Ticker`` and ``_date`` columns.
+
+    Returns:
+        DataFrame of **new rows only** (same schema as
+        :func:`build_training_dataset`).  The caller should concatenate
+        this with *existing_df* and de-duplicate.
+    """
+    existing_df = existing_df.copy()
+    existing_df["_date"] = pd.to_datetime(existing_df["_date"])
+
+    # Per-ticker max date for cutoff
+    ticker_max_dates: dict[str, pd.Timestamp] = (
+        existing_df.groupby("Ticker")["_date"].max().to_dict()
+    )
+    global_max = existing_df["_date"].max()
+
+    logger.info(
+        "Incremental build: %d tickers in existing data, global max date %s",
+        len(ticker_max_dates), global_max.date(),
+    )
+
+    # Fetch macro data once
+    macro_df = get_macro_data(period="6y")
+
+    all_rows: list[dict] = []
+    skipped = 0
+
+    for ticker in tickers:
+        try:
+            cutoff = ticker_max_dates.get(ticker)
+
+            if cutoff is None:
+                # New ticker — fetch full 3y history
+                df = get_stock_data(ticker, period="3y")
+                row_cutoff = None
+            else:
+                # Existing ticker — fetch from cutoff minus lookback
+                start_date = (cutoff - pd.Timedelta(days=_LOOKBACK_CALENDAR_DAYS)).strftime("%Y-%m-%d")
+                df = get_stock_data(ticker, start=start_date)
+                row_cutoff = cutoff
+
+            if df.empty or len(df) < 200:
+                if cutoff is None:
+                    logger.warning("Skipping new ticker %s — insufficient history", ticker)
+                else:
+                    skipped += 1
+                continue
+
+            df = compute_technical_features(df)
+
+            # Forward max return target
+            rolling_max = (
+                df["Close"]
+                .iloc[::-1]
+                .rolling(window=63, min_periods=1)
+                .max()
+                .iloc[::-1]
+            )
+            df[TARGET_COLUMN] = rolling_max / df["Close"] - 1
+            df.loc[df.index[-63:], TARGET_COLUMN] = np.nan
+
+            # Fetch auxiliary data sources
+            hist_fund = get_historical_fundamentals(ticker)
+            earnings_df = get_earnings_history(ticker)
+            trends_df = get_google_trends(ticker)
+            sec_df = get_sec_filings(ticker)
+
+            valid_mask = df[TARGET_COLUMN].notna() & df["SMA_200"].notna()
+            valid_df = df[valid_mask]
+            if valid_df.empty:
+                continue
+
+            # Extract calendar dates
+            if "Date" in valid_df.columns:
+                sample_dates = pd.to_datetime(
+                    valid_df["Date"].dt.tz_localize(None)
+                    if hasattr(valid_df["Date"].dt, "tz_localize") and valid_df["Date"].dt.tz is not None
+                    else valid_df["Date"]
+                )
+            else:
+                sample_dates = pd.to_datetime(valid_df.index)
+
+            # Keep only rows after the existing cutoff
+            if row_cutoff is not None:
+                new_mask = sample_dates > cutoff
+                valid_df = valid_df.loc[new_mask.values]
+                sample_dates = sample_dates[new_mask.values]
+
+            if valid_df.empty:
+                skipped += 1
+                continue
+
+            # Time-align auxiliary features
+            aligned_hist_fund = align_fundamentals_to_dates(hist_fund, sample_dates)
+            aligned_earnings = align_earnings_to_dates(earnings_df, sample_dates)
+            aligned_trends = align_trends_to_dates(trends_df, sample_dates)
+            aligned_sec = align_sec_to_dates(sec_df, sample_dates)
+            aligned_macro = align_macro_to_dates(macro_df, sample_dates)
+            aligned_si = align_short_interest_to_dates(ticker, sample_dates)
+            aligned_of = align_options_flow_to_dates(ticker, sample_dates)
+            aligned_ins = align_insider_to_dates(ticker, sample_dates)
+            aligned_reddit = align_reddit_sentiment_to_dates(ticker, sample_dates)
+
+            for i, (idx, row) in enumerate(valid_df.iterrows()):
+                data_point: dict = {"Ticker": ticker}
+                date_val = sample_dates.iloc[i] if hasattr(sample_dates, "iloc") else sample_dates[i]
+                data_point["_date"] = str(date_val)
+
+                for col in TECHNICAL_FEATURES:
+                    data_point[col] = row.get(col, np.nan)
+
+                for col in HIST_FUNDAMENTAL_FEATURES:
+                    data_point[col] = (
+                        aligned_hist_fund[col].iloc[i]
+                        if col in aligned_hist_fund.columns
+                        else np.nan
+                    )
+
+                for col in MACRO_FEATURES:
+                    data_point[col] = (
+                        aligned_macro[col].iloc[i]
+                        if col in aligned_macro.columns
+                        else np.nan
+                    )
+
+                for col in EARNINGS_FEATURES:
+                    data_point[col] = (
+                        aligned_earnings[col].iloc[i]
+                        if col in aligned_earnings.columns
+                        else np.nan
+                    )
+
+                if not trends_df.empty:
+                    for col in TRENDS_FEATURES:
+                        data_point[col] = (
+                            aligned_trends[col].iloc[i]
+                            if col in aligned_trends.columns
+                            else np.nan
+                        )
+
+                for col in SEC_FEATURES:
+                    data_point[col] = (
+                        aligned_sec[col].iloc[i]
+                        if col in aligned_sec.columns
+                        else np.nan
+                    )
+
+                for col in SHORT_INTEREST_FEATURES:
+                    data_point[col] = (
+                        aligned_si[col].iloc[i]
+                        if col in aligned_si.columns
+                        else np.nan
+                    )
+
+                for col in OPTIONS_FLOW_FEATURES:
+                    data_point[col] = (
+                        aligned_of[col].iloc[i]
+                        if col in aligned_of.columns
+                        else np.nan
+                    )
+
+                for col in INSIDER_FEATURES:
+                    data_point[col] = (
+                        aligned_ins[col].iloc[i]
+                        if col in aligned_ins.columns
+                        else np.nan
+                    )
+
+                for col in REDDIT_SENTIMENT_FEATURES:
+                    data_point[col] = (
+                        aligned_reddit[col].iloc[i]
+                        if col in aligned_reddit.columns
+                        else np.nan
+                    )
+
+                data_point[TARGET_COLUMN] = row[TARGET_COLUMN]
+                all_rows.append(data_point)
+
+            logger.info(
+                "Incremental %s: %d new samples (cutoff=%s)",
+                ticker, len(valid_df),
+                cutoff.date() if cutoff is not None else "none",
+            )
+
+        except Exception:
+            logger.exception("Error processing %s incrementally", ticker)
+
+    logger.info(
+        "Incremental build done: %d new rows from %d tickers (%d skipped — already up to date)",
+        len(all_rows), len(tickers), skipped,
+    )
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    return pd.DataFrame(all_rows)
