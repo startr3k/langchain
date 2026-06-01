@@ -308,11 +308,7 @@ def build_training_dataset(
 
     for ticker in tickers:
         try:
-            # 3y window ensures all historical data sources have coverage
-            # (YFinance quarterly financials only go back ~5 quarters;
-            # with 3y price data, valid training rows start ~2024-03,
-            # which is after all tickers' earliest fundamental date)
-            df = get_stock_data(ticker, period="3y")
+            df = get_stock_data(ticker, period="10y")
             if df.empty or len(df) < 200:
                 logger.warning("Skipping %s — insufficient history", ticker)
                 continue
@@ -505,7 +501,7 @@ def build_incremental_dataset(
        existing max date.
 
     Tickers that are entirely absent from *existing_df* are fetched in
-    full (``period="3y"``).
+    full (``period="10y"``).
 
     Args:
         tickers: List of ticker symbols.
@@ -537,13 +533,27 @@ def build_incremental_dataset(
     all_rows: list[dict] = []
     skipped = 0
 
+    today = pd.Timestamp.now().normalize()
+
     for ticker in tickers:
         try:
             cutoff = ticker_max_dates.get(ticker)
 
+            if cutoff is not None:
+                # Fast path: skip tickers whose data is already up to date.
+                # The TARGET_COLUMN is NaN'd for the last 63 trading days
+                # (~90 calendar days), so the max _date in the CSV is always
+                # ~90 calendar days behind the latest price date.  New valid
+                # training rows can only appear when today > cutoff + 93 days
+                # (90 + margin for weekends/holidays).
+                days_stale = (today - cutoff).days
+                if days_stale <= 93:
+                    skipped += 1
+                    continue
+
             if cutoff is None:
-                # New ticker — fetch full 3y history
-                df = get_stock_data(ticker, period="3y")
+                # New ticker — fetch full 10y history to match existing dataset
+                df = get_stock_data(ticker, period="10y")
                 row_cutoff = None
             else:
                 # Existing ticker — fetch from cutoff minus lookback
