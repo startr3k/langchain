@@ -1446,12 +1446,10 @@ elif page == "Model Explanations":
                 _agg_hits = _pool_eval.get("aggregate_hits", 0)
                 _agg_picks = _pool_eval.get("aggregate_picks", 0)
                 _agg_hr = _pool_eval.get("aggregate_hit_rate", 0)
-                _mean_auc = sum(
-                    fm["cls_auc"] for fm in _fold_metrics if fm["cls_auc"] is not None
-                ) / max(len(_fold_metrics), 1)
-                _mean_r2 = sum(
-                    fm["huber_r2"] for fm in _fold_metrics if fm["huber_r2"] is not None
-                ) / max(len(_fold_metrics), 1)
+                _valid_aucs = [fm["cls_auc"] for fm in _fold_metrics if fm["cls_auc"] is not None]
+                _mean_auc = sum(_valid_aucs) / max(len(_valid_aucs), 1)
+                _valid_r2s = [fm["huber_r2"] for fm in _fold_metrics if fm["huber_r2"] is not None]
+                _mean_r2 = sum(_valid_r2s) / max(len(_valid_r2s), 1)
 
                 a1, a2, a3, a4 = st.columns(4)
                 a1.metric("Mean Cls AUC", f"{_mean_auc:.4f}")
