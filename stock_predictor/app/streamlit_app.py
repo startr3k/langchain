@@ -228,53 +228,47 @@ if page == "Top Recommendations":
 
     if regenerate:
         from datetime import date as _date
+        from stock_predictor.models.automl_model import MIN_ELITE_POOL
 
         csv_path = Path(DEFAULT_CSV_PATH)
         today_str = _date.today().isoformat()
-
-        # Remove today's rows so run_daily_picks doesn't hit the
-        # "already recorded" cache, then re-run the pipeline.
-        old_rows = None
-        if csv_path.exists():
-            try:
-                existing = pd.read_csv(csv_path)
-                old_rows = existing[existing["date"] == today_str]
-                cleaned = existing[existing["date"] != today_str]
-                cleaned.to_csv(csv_path, index=False)
-            except Exception:
-                pass
 
         with st.spinner(
             "Re-running daily picks pipeline on NASDAQ universe..."
         ):
             try:
+                # Always generate picks for display (save_to_csv=False
+                # bypasses the pool-size gate and CSV caching).
                 new_picks = run_daily_picks(
                     top_k=max(top_x, 10),
+                    save_to_csv=False,
                 )
                 if new_picks is not None and not new_picks.empty:
                     today_picks = new_picks
                     from_pipeline = True
-                    st.success(f"Regenerated {len(today_picks)} picks!")
-                else:
-                    # Pool < 75 or no picks — restore old cached rows
-                    if old_rows is not None and not old_rows.empty:
-                        old_rows.to_csv(csv_path, mode="a", header=False, index=False)
-                        today_picks = old_rows
-                        st.warning(
-                            "Elite pool < 75 — weak signal day. "
-                            "Keeping previous cached picks."
-                        )
+
+                    pool_size = int(new_picks["elite_pool_size"].iloc[0]) if "elite_pool_size" in new_picks.columns else 0
+
+                    # Only update the scheduler CSV when pool >= 75
+                    if pool_size >= MIN_ELITE_POOL:
+                        # Remove today's old rows, write new ones
+                        if csv_path.exists():
+                            try:
+                                existing = pd.read_csv(csv_path)
+                                cleaned = existing[existing["date"] != today_str]
+                                cleaned.to_csv(csv_path, index=False)
+                            except Exception:
+                                pass
+                        new_picks.to_csv(csv_path, mode="a", header=not csv_path.exists(), index=False)
+                        st.success(f"Regenerated {len(today_picks)} picks! (pool={pool_size}, saved to CSV)")
                     else:
-                        st.warning(
-                            "Elite pool < 75 — weak signal day. No picks recorded."
+                        st.success(
+                            f"Regenerated {len(today_picks)} picks for display. "
+                            f"Pool size {pool_size} < {MIN_ELITE_POOL} — not saved to scheduler CSV."
                         )
+                else:
+                    st.warning("Pipeline produced no picks.")
             except Exception as e:
-                # Restore old rows on error too
-                if old_rows is not None and not old_rows.empty:
-                    try:
-                        old_rows.to_csv(csv_path, mode="a", header=False, index=False)
-                    except Exception:
-                        pass
                 st.error(f"Pipeline error: {e}")
 
     if today_picks is not None and not results:
