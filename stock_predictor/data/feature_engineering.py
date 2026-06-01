@@ -537,9 +537,22 @@ def build_incremental_dataset(
     all_rows: list[dict] = []
     skipped = 0
 
+    today = pd.Timestamp.now().normalize()
+
     for ticker in tickers:
         try:
             cutoff = ticker_max_dates.get(ticker)
+
+            if cutoff is not None:
+                # Fast path: skip tickers whose data is already up to date.
+                # The 63-day target window makes the latest *usable* row
+                # ~63 trading days before the last price date, so any
+                # ticker whose max date is within the last 2 calendar days
+                # cannot possibly produce new training rows.
+                days_stale = (today - cutoff).days
+                if days_stale <= 2:
+                    skipped += 1
+                    continue
 
             if cutoff is None:
                 # New ticker — fetch full 3y history
