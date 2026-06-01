@@ -1037,6 +1037,25 @@ class StockReturnPredictor:
             # ---- Per-day top-10 evaluation with Z-score ranking ----
             ltr_scores = fold_ltr_model.predict(dtest_ltr) if fold_ltr_model is not None else pred_mfd_test[elite_test]
 
+            # Save intermediates for post-retrain evaluation at different pool thresholds
+            import pickle as _pkl
+            _inter_dir = Path(__file__).resolve().parent.parent.parent / "intermediates"
+            _inter_dir.mkdir(exist_ok=True)
+            _fold_data = {
+                "y_proba_test": y_proba_pos,
+                "pred_mfd_test": pred_mfd_test,
+                "ltr_scores": ltr_scores,
+                "elite_test": elite_test,
+                "test_dates": test_dates,
+                "y_test_raw": y_test_raw.values,
+                "tickers": df_test["Ticker"].values,
+                "cls_auc": cls_auc,
+                "huber_r2": r2,
+            }
+            with open(_inter_dir / f"fold{fold_idx + 1}.pkl", "wb") as _f:
+                _pkl.dump(_fold_data, _f)
+            logger.info("  Saved intermediates/fold%d.pkl", fold_idx + 1)
+
             unique_test_dates = np.unique(test_dates)
             daily_hits_list = []
             daily_returns_list = []

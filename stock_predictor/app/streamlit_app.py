@@ -33,6 +33,7 @@ from stock_predictor.pipeline.daily_picks import (
     run_daily_picks,
     evaluate_ground_truth,
     get_precision_over_time,
+    evaluate_folds_at_pool,
     DEFAULT_CSV_PATH,
     CSV_COLUMNS,
 )
@@ -2185,13 +2186,13 @@ elif page == "Daily Picks Pipeline":
             log_df = pd.DataFrame(run_log)
             st.dataframe(log_df, use_container_width=True)
 
-    # -- Ground truth evaluation ------------------------------------------
+    # -- Ground truth evaluation (pool >= 150) -----------------------------
     st.markdown("---")
-    st.subheader("🔍 Evaluate Ground Truth")
+    st.subheader("🔍 Evaluate Ground Truth (Pool ≥ 150)")
     st.markdown(
         "Check all historical picks for ≥20% upside from the recorded "
-        "closing price to date.  Updates existing records only if the "
-        "new upside is higher."
+        "closing price to date. Only includes days where elite pool ≥ 150. "
+        "Updates existing records only if the new upside is higher."
     )
     if st.button("🔍 Evaluate Ground Truth"):
         with st.spinner("Checking price history for all recorded picks..."):
@@ -2201,33 +2202,172 @@ elif page == "Daily Picks Pipeline":
                     st.info("No picks recorded yet.")
                 else:
                     evaluated = df_gt[df_gt["hit_20pct"].notna()]
+                    # Filter to pool >= 150
+                    if "elite_pool_size" in evaluated.columns:
+                        evaluated = evaluated[evaluated["elite_pool_size"] >= 150]
                     if evaluated.empty:
-                        st.info("No picks old enough to evaluate yet.")
+                        st.info("No picks with pool ≥ 150 old enough to evaluate yet.")
                     else:
                         hits = int(evaluated["hit_20pct"].sum())
                         total = len(evaluated)
                         prec = hits / total if total > 0 else 0
-                        st.metric("Overall Precision", f"{prec:.1%}", f"{hits}/{total} hits")
-                        st.dataframe(evaluated[["date", "ticker", "probability", "close_price",
-                                                 "max_upside_pct", "hit_20pct"]],
-                                     use_container_width=True)
+                        st.metric("Hit Rate (Pool ≥ 150)", f"{prec:.1%}", f"{hits}/{total} hits")
+                        display_cols = ["date", "ticker", "probability", "close_price",
+                                        "elite_pool_size", "max_upside_pct", "hit_20pct"]
+                        display_cols = [c for c in display_cols if c in evaluated.columns]
+                        st.dataframe(evaluated[display_cols], use_container_width=True)
             except Exception as e:
                 st.error(f"Evaluation error: {e}")
 
-    # Show precision over time if data exists
+    # Show precision over time (pool >= 150) if data exists
     st.markdown("---")
-    st.subheader("Precision Over Time")
-    prec_df = get_precision_over_time()
+    st.subheader("Precision Over Time (Pool ≥ 150)")
+    prec_df = get_precision_over_time(min_pool_size=150)
     if not prec_df.empty:
         st.line_chart(prec_df.set_index("date")["precision"])
 
         col_a, col_b, col_c = st.columns(3)
         overall_prec = prec_df["hits"].sum() / prec_df["total_picks"].sum() if prec_df["total_picks"].sum() > 0 else 0
-        col_a.metric("Overall Precision", f"{overall_prec:.1%}")
+        col_a.metric("Hit Rate (Pool ≥ 150)", f"{overall_prec:.1%}")
         col_b.metric("Total Picks", int(prec_df["total_picks"].sum()))
         col_c.metric("Days Tracked", len(prec_df))
     else:
-        st.info("No evaluated picks yet. Run the pipeline and evaluate ground truth to see precision over time.")
+        st.info("No evaluated picks with pool ≥ 150 yet.")
+
+    # -- Retrain model -----------------------------------------------------
+    st.markdown("---")
+    st.subheader("🔄 Retrain Model")
+    st.markdown(
+        "Retrain the model with an extended dataset. Creates a new "
+        "`training_data_extended.csv` (fresh 10y data merged with the "
+        "original full dataset) — does NOT overwrite `training_data_10y_full.csv`."
+    )
+
+    retrain_col1, retrain_col2 = st.columns(2)
+    with retrain_col1:
+        retrain_time = st.slider("FLAML time budget (seconds)", 60, 600, 300, key="retrain_time")
+    with retrain_col2:
+        retrain_folds = st.slider("Walk-forward folds", 3, 10, 5, key="retrain_folds")
+
+    if st.button("🔄 Retrain Model", type="primary"):
+        import os as _os
+
+        _project_root = Path(DEFAULT_CSV_PATH).parent
+        _original_csv = _project_root / "training_data_10y_full.csv"
+        _extended_csv = _project_root / "training_data_extended.csv"
+
+        progress = st.progress(0)
+        status = st.empty()
+
+        try:
+            # Step 1: Generate fresh 10y data
+            status.info("Step 1/4: Building fresh 10-year training dataset...")
+            progress.progress(5)
+
+            from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS as _tickers
+            from stock_predictor.data.feature_engineering import build_training_dataset
+
+            fresh_df = build_training_dataset(_tickers, include_sentiment=False)
+            progress.progress(20)
+            status.info(f"Fresh data: {len(fresh_df)} rows, {fresh_df['Ticker'].nunique()} tickers")
+
+            # Step 2: Load original full dataset and merge
+            status.info("Step 2/4: Merging with original full dataset...")
+            progress.progress(30)
+
+            if _original_csv.exists():
+                original_df = pd.read_csv(_original_csv)
+                original_df["_date"] = pd.to_datetime(original_df["_date"])
+                fresh_df["_date"] = pd.to_datetime(fresh_df["_date"])
+
+                # Combine: original data + any new rows from fresh data
+                # Keep original rows where they overlap, add fresh rows for new dates/tickers
+                combined = pd.concat([original_df, fresh_df], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["Ticker", "_date"], keep="first")
+                combined = combined.sort_values(["Ticker", "_date"]).reset_index(drop=True)
+
+                status.info(
+                    f"Extended dataset: {len(combined)} rows "
+                    f"(original: {len(original_df)}, fresh: {len(fresh_df)}, "
+                    f"merged: {len(combined)})"
+                )
+            else:
+                combined = fresh_df
+                status.warning("Original training CSV not found — using fresh data only.")
+
+            # Step 3: Save extended dataset (NOT overwriting original)
+            combined.to_csv(_extended_csv, index=False)
+            progress.progress(40)
+            status.info(f"Saved extended dataset to {_extended_csv.name}")
+
+            # Step 4: Retrain walk-forward on extended data
+            status.info("Step 3/4: Training walk-forward model on extended dataset...")
+            progress.progress(50)
+
+            predictor = StockReturnPredictor()
+            metrics = predictor.train_walk_forward(
+                df=combined,
+                time_budget=retrain_time,
+                n_folds=retrain_folds,
+            )
+            progress.progress(90)
+
+            # Step 4: Evaluate at pool >= 150 and save results
+            status.info("Step 4/4: Evaluating folds at pool ≥ 150...")
+            eval_file = _project_root / "fold_evaluation_pool150.txt"
+            eval_result = evaluate_folds_at_pool(min_pool=150, output_file=eval_file)
+
+            progress.progress(100)
+            status.success(
+                f"Retrain complete! {metrics.get('n_folds', 0)} folds, "
+                f"aggregate hit rate: {metrics.get('aggregate_top10_hit_rate', 0):.1%}"
+            )
+
+            # Show aggregate summary
+            if not eval_result.get("error"):
+                st.markdown(f"**Pool ≥ 150 evaluation**: "
+                            f"{eval_result['aggregate_hits']}/{eval_result['aggregate_picks']} hits "
+                            f"({eval_result['aggregate_hit_rate']:.1%}) over "
+                            f"{eval_result['aggregate_days']} days")
+
+                # Show sample per fold (3 days each)
+                for fr in eval_result.get("folds", []):
+                    with st.expander(
+                        f"Fold {fr['fold']} — {fr['n_days']} days, "
+                        f"Hit rate: {fr['hit_rate']:.1%}"
+                    ):
+                        sample = fr["details"][:3]
+                        for dd in sample:
+                            picks_str = ", ".join(
+                                f"{'✓' if p['hit'] else '✗'} {p['ticker']} ({p['actual_return']:.0%})"
+                                for p in dd["picks"]
+                            )
+                            st.markdown(
+                                f"**{dd['date']}** | Pool {dd['pool']} | "
+                                f"{dd['hits']}/10 hits | {picks_str}"
+                            )
+                        if len(fr["details"]) > 3:
+                            st.caption(f"... and {len(fr['details']) - 3} more days. "
+                                       f"Full results in {eval_file.name}")
+
+                st.info(f"Full evaluation written to `{eval_file.name}`")
+
+            # Show fold metrics table
+            if metrics.get("folds"):
+                fold_table = []
+                for f in metrics["folds"]:
+                    fold_table.append({
+                        "Fold": f["fold"],
+                        "Test Period": f["test_period"],
+                        "AUC": f["auc_test"],
+                        "Hit Rate": f"{f['top10_hit_rate']:.1%}",
+                        "Days": f["n_eval_days"],
+                    })
+                st.dataframe(pd.DataFrame(fold_table), use_container_width=True)
+
+        except Exception as e:
+            logger.exception("Retrain failed")
+            st.error(f"Retrain error: {e}")
 
     # Show raw CSV
     if DEFAULT_CSV_PATH.exists():
