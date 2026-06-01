@@ -1377,7 +1377,8 @@ elif page == "Model Explanations":
     try:
         _me_predictor = StockReturnPredictor()
         _me_predictor.load()
-    except FileNotFoundError:
+    except (FileNotFoundError, RuntimeError):
+        _me_predictor = None
         st.warning("No trained model found. Train the model on the Daily Picks Pipeline page.")
 
     # ── 1. Per-Fold Model Metrics ─────────────────────────────────
@@ -1518,7 +1519,7 @@ elif page == "Model Explanations":
                             sv = sv[:, :, 1]  # class 1
 
                         # SHAP beeswarm plot
-                        fig_shap, ax_shap = plt.subplots(figsize=(10, 8))
+                        plt.figure(figsize=(10, 8))
                         shap.summary_plot(
                             sv,
                             _sample,
@@ -1528,12 +1529,12 @@ elif page == "Model Explanations":
                             plot_size=None,
                         )
                         plt.tight_layout()
-                        st.pyplot(fig_shap)
-                        plt.close(fig_shap)
+                        st.pyplot(plt.gcf())
+                        plt.close("all")
 
                         # SHAP bar plot (mean absolute)
                         st.markdown("#### Mean Absolute SHAP Impact")
-                        fig_bar, ax_bar = plt.subplots(figsize=(10, 6))
+                        plt.figure(figsize=(10, 6))
                         shap.summary_plot(
                             sv,
                             _sample,
@@ -1544,8 +1545,8 @@ elif page == "Model Explanations":
                             plot_size=None,
                         )
                         plt.tight_layout()
-                        st.pyplot(fig_bar)
-                        plt.close(fig_bar)
+                        st.pyplot(plt.gcf())
+                        plt.close("all")
 
                         st.session_state["_shap_computed"] = True
                     else:
