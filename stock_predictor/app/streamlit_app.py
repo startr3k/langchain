@@ -2034,8 +2034,10 @@ elif page == "Daily Picks Pipeline":
                 original_df = pd.read_csv(_base_csv)
                 original_df["_date"] = pd.to_datetime(original_df["_date"])
 
-                # Use ALL tickers from the existing CSV, not just the hardcoded 50
-                _tickers = original_df["Ticker"].unique().tolist()
+                # Union of CSV tickers + NASDAQ_TOP_TICKERS so new tickers are picked up
+                from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
+                csv_tickers = set(original_df["Ticker"].unique())
+                _tickers = sorted(csv_tickers | set(NASDAQ_TOP_TICKERS))
 
                 _max_date = original_df["_date"].max()
                 status.info(
