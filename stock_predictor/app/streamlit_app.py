@@ -120,7 +120,7 @@ page = st.sidebar.radio(
         "Stock Analysis",
         "Social Sentiment",
         "Social Media Listener",
-        "Model Training",
+        "Model Explanations",
         "Daily Picks Pipeline",
         "Daily Picks History",
     ],
@@ -1115,6 +1115,18 @@ elif page == "Stock Analysis":
 
         if buzz_file.exists() or guidance_file.exists():
             cache = {"ticker": sa_ticker, "date": _sa_today, "_from_file": True}
+            # Fetch price data so chart renders from cache
+            try:
+                cache["price_df"] = get_stock_data(sa_ticker, period="1y")
+            except Exception:
+                cache["price_df"] = None
+            # Fetch prediction so metrics render from cache
+            try:
+                _restore_pred = StockReturnPredictor()
+                _restore_pred.load()
+                cache["prediction"] = _restore_pred.predict_ticker(sa_ticker, include_explanation=True)
+            except Exception:
+                cache["prediction"] = {}
             if buzz_file.exists():
                 cache["buzz"] = {"_from_file": True, "text": buzz_file.read_text()}
             if guidance_file.exists():
@@ -1351,479 +1363,206 @@ elif page == "Social Sentiment":
 
 
 # ---------------------------------------------------------------------------
-# Page: Model Training
+# Page: Model Explanations
 # ---------------------------------------------------------------------------
-elif page == "Model Training":
-    st.title("AutoML Model Training")
+elif page == "Model Explanations":
+    st.title("Model Explanations")
     st.markdown(
-        "Train the stock return prediction model using historical data from "
-        "YFinance combined with social media sentiment features."
+        "Explore the trained model's per-fold metrics, feature importances, "
+        "and SHAP explanations. Training is available on the Daily Picks Pipeline page."
     )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        num_tickers = st.slider("Number of training tickers", 5, 50, 20)
-    with col2:
-        time_budget = st.slider("AutoML time budget (seconds)", 30, 600, 300)
+    # ── Load model ────────────────────────────────────────────────
+    _me_predictor = None
+    try:
+        _me_predictor = StockReturnPredictor()
+        _me_predictor.load()
+    except (FileNotFoundError, RuntimeError):
+        _me_predictor = None
+        st.warning("No trained model found. Train the model on the Daily Picks Pipeline page.")
 
-    include_sentiment = st.checkbox("Include social media sentiment features", value=True)
+    # ── 1. Per-Fold Model Metrics ─────────────────────────────────
+    if _me_predictor is not None:
+        import pickle as _me_pkl
 
-    tickers = NASDAQ_TOP_TICKERS[:num_tickers]
-    st.write(f"Training tickers: {', '.join(tickers)}")
-
-    # Walk-forward options
-    st.markdown("---")
-    st.subheader("Training Mode")
-    training_mode = st.radio(
-        "Select training mode:",
-        ["Standard (single split)", "Walk-Forward Cross-Validation"],
-        help="Walk-forward trains on expanding windows for more robust evaluation.",
-    )
-
-    if training_mode == "Walk-Forward Cross-Validation":
-        wf_col1, wf_col2 = st.columns(2)
-        with wf_col1:
-            wf_folds = st.slider("Number of folds", 3, 10, 5)
-        with wf_col2:
-            wf_min_years = st.slider("Minimum training years", 2, 5, 3)
-
-    train_col, data_col = st.columns(2)
-
-    with train_col:
-        if st.button("Start Training", type="primary"):
-            predictor = StockReturnPredictor()
-            progress_bar = st.progress(0)
-            status = st.empty()
-
-            status.info("Building training dataset (this may take several minutes)...")
-            progress_bar.progress(10)
-
-            try:
-                if training_mode == "Walk-Forward Cross-Validation":
-                    import os
-                    csv_path = os.path.join(
-                        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                        "training_data_10y_full.csv",
-                    )
-                    if os.path.exists(csv_path):
-                        import pandas as _pd
-                        status.info(
-                            f"Loading full training dataset and running "
-                            f"{wf_folds}-fold walk-forward CV..."
-                        )
-                        progress_bar.progress(20)
-                        _df = _pd.read_csv(csv_path)
-                        metrics = predictor.train_walk_forward(
-                            df=_df,
-                            time_budget=time_budget,
-                            n_folds=wf_folds,
-                            min_train_years=wf_min_years,
-                        )
-                    else:
-                        status.warning(
-                            "Full training CSV not found. "
-                            "Falling back to standard training."
-                        )
-                        metrics = predictor.train(
-                            tickers=tickers,
-                            time_budget=time_budget,
-                            include_sentiment=include_sentiment,
-                        )
-                else:
-                    metrics = predictor.train(
-                        tickers=tickers,
-                        time_budget=time_budget,
-                        include_sentiment=include_sentiment,
-                    )
-                progress_bar.progress(100)
-                status.success("Training complete!")
-
-                st.session_state["training_metrics"] = metrics
-                st.session_state["trained_predictor"] = predictor
-
-            except Exception as e:
-                progress_bar.progress(0)
-                status.error(f"Training failed: {e}")
-
-    with data_col:
-        if st.button("Generate & Preview Training Data"):
-            with st.spinner("Building training dataset (fetching data from YFinance)..."):
-                try:
-                    training_df = build_training_dataset(
-                        tickers, include_sentiment=include_sentiment,
-                    )
-                    if training_df.empty:
-                        st.warning("No training data could be generated.")
-                    else:
-                        st.session_state["training_data"] = training_df
-                        st.success(
-                            f"Generated {len(training_df)} training samples "
-                            f"across {training_df['Ticker'].nunique()} tickers "
-                            f"with {len(training_df.columns)} columns."
-                        )
-                except Exception as e:
-                    st.error(f"Error generating training data: {e}")
-
-    # Display training data if available
-    if "training_data" in st.session_state:
-        training_df = st.session_state["training_data"]
-        st.markdown("---")
-        st.subheader("Training Data Preview")
-
-        # Summary stats
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            st.metric("Total Samples", len(training_df))
-        with col_b:
-            st.metric("Tickers", training_df["Ticker"].nunique())
-        with col_c:
-            st.metric("Features", len(training_df.columns) - 2)  # exclude Ticker & target
-
-        # Target distribution
-        if TARGET_COLUMN in training_df.columns:
-            target_vals = training_df[TARGET_COLUMN].dropna()
-            if not target_vals.empty:
-                import plotly.express as px
-
-                st.subheader("Target Distribution (3-Month Forward Return)")
-                fig = px.histogram(
-                    target_vals, nbins=50,
-                    labels={"value": "3-Month Return", "count": "Count"},
-                    title="Distribution of Forward Returns",
-                )
-                fig.update_layout(height=350)
-                st.plotly_chart(fig, use_container_width=True)
-
-        # Data table
-        st.subheader("Data Table")
-        st.dataframe(training_df, use_container_width=True, height=400)
-
-        # Download button
-        csv = training_df.to_csv(index=False)
-        st.download_button(
-            label="Download Training Data as CSV",
-            data=csv,
-            file_name="stock_predictor_training_data.csv",
-            mime="text/csv",
-            type="primary",
+        st.subheader("Per-Fold Model Metrics")
+        st.caption(
+            "Results from the 4-stage walk-forward ensemble. Each fold trains on "
+            "all prior data and evaluates on the next time window."
         )
 
-    # ---- Model Evaluation Metrics ----
-    if "training_metrics" in st.session_state:
-        metrics = st.session_state["training_metrics"]
-        st.markdown("---")
+        _inter_dir = Path(__file__).resolve().parent.parent.parent / "intermediates"
+        _fold_files = sorted(_inter_dir.glob("fold*.pkl")) if _inter_dir.exists() else []
 
-        # --- Walk-Forward Results ---
-        if "folds" in metrics:
-            st.subheader("Walk-Forward Cross-Validation Results")
-            st.info(
-                f"**{metrics.get('n_folds', 0)} folds** | "
-                f"Aggregate Top-10: **{metrics.get('aggregate_top10_hits', 0)}"
-                f"/{metrics.get('aggregate_top10_total', 0)}** "
-                f"({metrics.get('aggregate_top10_hit_rate', 0)*100:.1f}%) | "
-                f"Mean AUC: {metrics.get('mean_auc_test', 0):.4f} ± "
-                f"{metrics.get('std_auc_test', 0):.4f} | "
-                f"Mean AP: {metrics.get('mean_ap_test', 0):.4f} ± "
-                f"{metrics.get('std_ap_test', 0):.4f}"
-            )
-
-            # Per-fold table
-            fold_data = []
-            for f in metrics["folds"]:
-                fold_data.append({
-                    "Fold": f["fold"],
-                    "Test Period": f["test_period"],
-                    "Train Rows": f["train_rows"],
-                    "Test Rows": f["test_rows"],
-                    "AUC (Train)": f["auc_train"],
-                    "AUC (Test)": f["auc_test"],
-                    "AUC Gap": f["auc_gap"],
-                    "AP (Train)": f["ap_train"],
-                    "AP (Test)": f["ap_test"],
-                    "AP Gap": f["ap_gap"],
-                    "Top-10 Hits": f"{f['top10_hits']}/10",
-                    "Hit Rate": f"{f['top10_hit_rate']*100:.0f}%",
+        if _fold_files:
+            # Load per-fold metrics from intermediates
+            _fold_metrics = []
+            for _fp in _fold_files:
+                _fidx = int(_fp.stem.replace("fold", ""))
+                with open(_fp, "rb") as _ff:
+                    _fd = _me_pkl.load(_ff)
+                _fold_metrics.append({
+                    "fold": _fidx,
+                    "cls_auc": _fd.get("cls_auc"),
+                    "huber_r2": _fd.get("huber_r2"),
                 })
-            import pandas as _pd_wf
+
+            # Evaluate pool >= 150 hit rate per fold
+            _pool_eval = evaluate_folds_at_pool(min_pool=150)
+
+            # Build per-fold display table
+            _fold_rows = []
+            _pool_folds = {f["fold"]: f for f in _pool_eval.get("folds", [])} if not _pool_eval.get("error") else {}
+            for _fm in _fold_metrics:
+                _pf = _pool_folds.get(_fm["fold"], {})
+                _row = {
+                    "Fold": _fm["fold"],
+                    "Stage 1: Cls AUC": f"{_fm['cls_auc']:.4f}" if _fm["cls_auc"] is not None else "N/A",
+                    "Stage 2: Huber R²": f"{_fm['huber_r2']:.4f}" if _fm["huber_r2"] is not None else "N/A",
+                }
+                if _pf:
+                    _days = _pf.get("n_days", 0)
+                    _hits = _pf.get("total_hits", 0)
+                    _picks = _pf.get("total_picks", 0)
+                    _hr = _pf.get("hit_rate", 0)
+                    _row["Pool≥150 Days"] = _days
+                    _row["Pool≥150 Hits"] = f"{_hits}/{_picks}" if _picks > 0 else "N/A"
+                    _row["Pool≥150 Hit Rate"] = f"{_hr:.1%}" if _days > 0 else "N/A"
+                else:
+                    _row["Pool≥150 Days"] = 0
+                    _row["Pool≥150 Hits"] = "N/A"
+                    _row["Pool≥150 Hit Rate"] = "N/A"
+                _fold_rows.append(_row)
+
             st.dataframe(
-                _pd_wf.DataFrame(fold_data),
+                pd.DataFrame(_fold_rows),
                 use_container_width=True,
                 hide_index=True,
             )
 
-            # Per-fold top-10 picks
-            for f in metrics["folds"]:
-                if f.get("top10_picks"):
-                    with st.expander(
-                        f"Fold {f['fold']} Top-10 Picks ({f['test_period']})"
-                    ):
-                        picks_df = _pd_wf.DataFrame(f["top10_picks"])
-                        st.dataframe(picks_df, use_container_width=True, hide_index=True)
+            # Aggregate summary
+            if not _pool_eval.get("error"):
+                _agg_days = _pool_eval.get("aggregate_days", 0)
+                _agg_hits = _pool_eval.get("aggregate_hits", 0)
+                _agg_picks = _pool_eval.get("aggregate_picks", 0)
+                _agg_hr = _pool_eval.get("aggregate_hit_rate", 0)
+                _valid_aucs = [fm["cls_auc"] for fm in _fold_metrics if fm["cls_auc"] is not None]
+                _mean_auc = sum(_valid_aucs) / max(len(_valid_aucs), 1)
+                _valid_r2s = [fm["huber_r2"] for fm in _fold_metrics if fm["huber_r2"] is not None]
+                _mean_r2 = sum(_valid_r2s) / max(len(_valid_r2s), 1)
+
+                a1, a2, a3, a4 = st.columns(4)
+                a1.metric("Mean Cls AUC", f"{_mean_auc:.4f}")
+                a2.metric("Mean Huber R²", f"{_mean_r2:.4f}")
+                a3.metric(
+                    "Aggregate Hit Rate (Pool≥150)",
+                    f"{_agg_hr:.1%}",
+                    help=f"{_agg_hits}/{_agg_picks} hits across {_agg_days} days",
+                )
+                a4.metric("Total Pool≥150 Days", _agg_days)
         else:
-            st.subheader("Model Evaluation Metrics")
-
-        # --- Architecture summary ---
-        ltr = metrics.get("ltr", {})
-        if ltr.get("status") == "trained":
             st.info(
-                "**Ensemble Architecture:** Classification (FLAML) + "
-                "Learning-to-Rank (LambdaMART) — 50/50 weighted. "
-                "The LTR model directly optimizes NDCG@10 to rank "
-                "stocks within each trading day."
+                "No fold intermediates found. Retrain the model on the "
+                "Daily Picks Pipeline page to generate per-fold metrics."
             )
 
-        # --- LTR Ranking Quality (primary) ---
-        if ltr.get("status") == "trained":
-            st.markdown("#### Ranking Quality (LTR)")
-            st.caption(
-                "The LTR model ranks stocks within each day so the "
-                "top-10 picks have the highest precision."
-            )
-            l1, l2, l3 = st.columns(3)
-            with l1:
-                st.metric(
-                    "NDCG@10 (Test)",
-                    f"{ltr.get('ndcg10_test', 0):.4f}",
-                    help="Ranking quality of top-10 on held-out test dates",
-                )
-            with l2:
-                st.metric(
-                    "NDCG@10 (Train)",
-                    f"{ltr.get('ndcg10_train', 0):.4f}",
-                )
-            with l3:
-                st.metric(
-                    "NDCG@10 Gap",
-                    f"{ltr.get('ndcg10_gap', 0):.4f}",
-                    help="Train − Test gap (lower = less overfitting)",
-                )
-            l4, l5 = st.columns(2)
-            with l4:
-                st.metric("LTR Best Iteration", ltr.get("best_iteration", 0))
-            with l5:
-                st.metric(
-                    "Date Groups (Train/Test)",
-                    f"{ltr.get('train_groups', 0)} / {ltr.get('test_groups', 0)}",
-                )
+        # ── 2. SHAP Summary Plot ─────────────────────────────────────
+        st.markdown("---")
+        st.subheader("SHAP Feature Impact")
+        st.caption(
+            "Shows how each feature's value pushes the model's probability "
+            "up or down. Red = high feature value, blue = low."
+        )
 
-        # --- Top-N Precision (primary metrics) ---
-        top_n = metrics.get("top_n", {})
-        top_10 = top_n.get("top_10", {})
-        top_20 = top_n.get("top_20", {})
-        top_50 = top_n.get("top_50", {})
+        if st.button("Generate SHAP Plot", type="primary"):
+            with st.spinner("Computing SHAP values (this may take a moment)..."):
+                try:
+                    import shap
+                    import matplotlib.pyplot as plt
+                    import numpy as _np
 
-        if top_10:
-            st.markdown("#### Top Pick Precision (Test Set)")
-            st.caption(
-                "How many of the ensemble's highest-confidence picks actually "
-                "achieved ≥20% peak return within 3 months."
-            )
-            p1, p2, p3 = st.columns(3)
-            with p1:
-                hit_rate_10 = top_10.get("hit_rate", 0)
-                hits_10 = top_10.get("hits", 0)
-                st.metric(
-                    "Top-10 Hit Rate",
-                    f"{hits_10}/{top_10.get('total', 10)} ({hit_rate_10:.0%})",
-                    help="Fraction of top 10 predictions that hit ≥20% peak return",
-                )
-            with p2:
-                if top_20:
-                    hit_rate_20 = top_20.get("hit_rate", 0)
-                    hits_20 = top_20.get("hits", 0)
-                    st.metric(
-                        "Top-20 Hit Rate",
-                        f"{hits_20}/{top_20.get('total', 20)} ({hit_rate_20:.0%})",
-                    )
-            with p3:
-                if top_50:
-                    hit_rate_50 = top_50.get("hit_rate", 0)
-                    hits_50 = top_50.get("hits", 0)
-                    st.metric(
-                        "Top-50 Hit Rate",
-                        f"{hits_50}/{top_50.get('total', 50)} ({hit_rate_50:.0%})",
-                    )
+                    # Get the underlying model
+                    model = _me_predictor.automl.model.estimator
+                    if hasattr(model, "feature_name_"):
+                        model_features = model.feature_name_
+                    elif hasattr(model, "feature_names_in_"):
+                        model_features = list(model.feature_names_in_)
+                    else:
+                        model_features = _me_predictor.feature_names
 
-            r1, r2, r3 = st.columns(3)
-            with r1:
-                avg_ret_10 = top_10.get("avg_peak_return", 0)
-                st.metric(
-                    "Top-10 Avg Peak Return",
-                    f"{avg_ret_10:.1%}",
-                    help="Average peak return across the top 10 picks",
-                )
-            with r2:
-                if top_20:
-                    st.metric(
-                        "Top-20 Avg Peak Return",
-                        f"{top_20.get('avg_peak_return', 0):.1%}",
-                    )
-            with r3:
-                if top_50:
-                    st.metric(
-                        "Top-50 Avg Peak Return",
-                        f"{top_50.get('avg_peak_return', 0):.1%}",
-                    )
+                    # Build a background dataset from training CSV
+                    _csv_path = Path(__file__).resolve().parent.parent.parent / "training_data_10y_full.csv"
+                    if _csv_path.exists():
+                        _bg_df = pd.read_csv(_csv_path, nrows=5000)
+                        from stock_predictor.models.automl_model import _compute_derived_features
+                        _bg_df = _compute_derived_features(_bg_df)
+                        for col in _me_predictor.feature_names:
+                            if col not in _bg_df.columns:
+                                _bg_df[col] = 0.0
+                        _bg_df = _bg_df[[c for c in model_features if c in _bg_df.columns]]
+                        if _me_predictor.feature_medians is not None:
+                            _bg_df = _bg_df.fillna(_me_predictor.feature_medians)
+                        else:
+                            _bg_df = _bg_df.fillna(0.0)
 
-            # Top 10 individual picks table
-            picks = top_10.get("picks", [])
-            if picks:
-                st.markdown("**Top 10 Picks Detail**")
-                picks_df = pd.DataFrame(picks)
-                picks_df = picks_df.rename(columns={
-                    "rank": "Rank",
-                    "ticker": "Ticker",
-                    "probability": "Ensemble Score",
-                    "actual_return": "Peak Return",
-                    "hit": "Hit (≥20%)",
-                })
-                picks_df["Peak Return"] = picks_df["Peak Return"].apply(
-                    lambda x: f"{x:.1%}" if x is not None else "N/A"
-                )
-                picks_df["Ensemble Score"] = picks_df["Ensemble Score"].apply(
-                    lambda x: f"{x:.1%}"
-                )
-                picks_df["Hit (≥20%)"] = picks_df["Hit (≥20%)"].apply(
-                    lambda x: "✓" if x else "✗"
-                )
-                st.dataframe(picks_df, use_container_width=True, hide_index=True)
+                        # Sample for SHAP computation
+                        _sample = _bg_df.sample(min(500, len(_bg_df)), random_state=42)
 
-        # --- Market Regime & Ticker Calibration ---
-        regime = metrics.get("regime", {})
-        ticker_cal = metrics.get("ticker_calibration", {})
+                        explainer = shap.TreeExplainer(model)
+                        shap_values = explainer(_sample)
 
-        if regime.get("status") == "trained" or ticker_cal.get("status") == "trained":
-            st.markdown("#### Precision Enhancement Models")
+                        # Handle multi-output (binary classifier)
+                        sv = shap_values.values
+                        if sv.ndim == 3:
+                            sv = sv[:, :, 1]  # class 1
 
-        if regime.get("status") == "trained":
-            with st.expander("Market Regime Detection", expanded=False):
-                st.caption(
-                    "Predicts daily hit rate from macro conditions "
-                    "(VIX, market returns, yield curve). Used to flag "
-                    "low-confidence days."
-                )
-                rc1, rc2, rc3 = st.columns(3)
-                with rc1:
-                    st.metric("R² (Test)", f"{regime.get('r2_test', 0):.4f}")
-                with rc2:
-                    st.metric("R² (Train)", f"{regime.get('r2_train', 0):.4f}")
-                with rc3:
-                    st.metric(
-                        "R² Gap (Overfitting)",
-                        f"{regime.get('r2_gap', 0):.4f}",
-                        help="Train − Test gap (lower = less overfitting)",
-                    )
-                st.caption(
-                    f"Training days: {regime.get('n_train_days', 0)} | "
-                    f"Test days: {regime.get('n_test_days', 0)} | "
-                    f"Features: {', '.join(regime.get('features', []))}"
-                )
+                        # SHAP beeswarm plot
+                        plt.figure(figsize=(10, 8))
+                        shap.summary_plot(
+                            sv,
+                            _sample,
+                            feature_names=list(_sample.columns),
+                            show=False,
+                            max_display=20,
+                            plot_size=None,
+                        )
+                        plt.tight_layout()
+                        st.pyplot(plt.gcf())
+                        plt.close("all")
 
-        if ticker_cal.get("status") == "trained":
-            with st.expander("Per-Ticker Calibration", expanded=False):
-                st.caption(
-                    "Tracks each ticker's historical hit rate in top-10 "
-                    "picks and penalizes repeat false positives (hit rate <30%)."
-                )
-                tc1, tc2 = st.columns(2)
-                with tc1:
-                    st.metric(
-                        "Tickers Tracked",
-                        ticker_cal.get("tickers_tracked", 0),
-                    )
-                with tc2:
-                    st.metric(
-                        "Tickers Penalized",
-                        ticker_cal.get("tickers_penalized", 0),
-                        help="Tickers with <30% hit rate in top-10 appearances",
-                    )
-                penalized = ticker_cal.get("penalized_tickers", {})
-                if penalized:
-                    st.markdown("**Penalized Tickers (lowest calibration factors):**")
-                    pen_rows = [
-                        {"Ticker": t, "Calibration Factor": f}
-                        for t, f in penalized.items()
-                    ]
-                    st.dataframe(
-                        pd.DataFrame(pen_rows),
-                        use_container_width=True, hide_index=True,
-                    )
+                        # SHAP bar plot (mean absolute)
+                        st.markdown("#### Mean Absolute SHAP Impact")
+                        plt.figure(figsize=(10, 6))
+                        shap.summary_plot(
+                            sv,
+                            _sample,
+                            feature_names=list(_sample.columns),
+                            plot_type="bar",
+                            show=False,
+                            max_display=20,
+                            plot_size=None,
+                        )
+                        plt.tight_layout()
+                        st.pyplot(plt.gcf())
+                        plt.close("all")
 
-        # --- Classification metrics (collapsible) ---
-        with st.expander("Classification Model Metrics (FLAML)"):
-            m1, m2, m3, m4 = st.columns(4)
-            with m1:
-                st.metric(
-                    "AUC-ROC (Test)",
-                    f"{metrics.get('auc_roc', 0):.4f}",
-                    help="Area Under ROC Curve on held-out test set",
-                )
-            with m2:
-                st.metric(
-                    "Avg Precision (Test)",
-                    f"{metrics.get('avg_precision', 0):.4f}",
-                    help="Area under the Precision-Recall curve",
-                )
-            with m3:
-                st.metric("Best Model", metrics.get("best_estimator", "N/A"))
-            with m4:
-                st.metric("Training Samples", metrics.get("training_samples", 0))
+                        st.session_state["_shap_computed"] = True
+                    else:
+                        st.warning("Training CSV not found. Cannot compute SHAP values.")
 
-            opt_thresh = metrics.get("optimal_threshold", 0.5)
-            st.markdown(f"**At precision-optimized threshold ({opt_thresh:.2f}):**")
-            o1, o2, o3, o4 = st.columns(4)
-            with o1:
-                st.metric("Precision", f"{metrics.get('precision_optimal', 0):.4f}")
-            with o2:
-                st.metric("Recall", f"{metrics.get('recall_optimal', 0):.4f}")
-            with o3:
-                st.metric("F1 Score", f"{metrics.get('f1_optimal', 0):.4f}")
-            with o4:
-                st.metric("Accuracy", f"{metrics.get('accuracy_optimal', 0):.4f}")
+                except Exception as e:
+                    logger.exception("SHAP computation failed")
+                    st.error(f"SHAP computation failed: {e}")
 
-            # Overfitting check
-            st.markdown("**Overfitting Check:**")
-            m5, m6 = st.columns(2)
-            with m5:
-                st.metric(
-                    "AUC (Train)",
-                    f"{metrics.get('auc_train', 0):.4f}",
-                    help="Compare with Test AUC to detect overfitting",
-                )
-            with m6:
-                st.metric(
-                    "AP (Train)",
-                    f"{metrics.get('ap_train', 0):.4f}",
-                    help="Compare with Test AP",
-                )
-
-        with st.expander("Full Training Configuration"):
-            st.json(metrics)
-
-    # ---- Feature Importances ----
-    show_importance = False
-    predictor_for_importance = None
-    if "trained_predictor" in st.session_state:
-        predictor_for_importance = st.session_state["trained_predictor"]
-        show_importance = True
-    else:
-        try:
-            predictor_for_importance = StockReturnPredictor()
-            predictor_for_importance.load()
-            show_importance = True
-        except FileNotFoundError:
-            pass
-
-    if show_importance and predictor_for_importance is not None:
-        grouped = predictor_for_importance.get_grouped_feature_importance(top_n=25)
+        # ── 3. Feature Importances (Grouped) ─────────────────────────
+        grouped = _me_predictor.get_grouped_feature_importance(top_n=25)
         if grouped:
             st.markdown("---")
             st.subheader("Feature Importances (Grouped by Correlation)")
             st.caption(
                 "Classification model feature importances. Correlated features "
                 "(Spearman |r| > 0.70) are summed into concept-level groups "
-                "so importance isn't diluted across redundant features. "
-                "These features feed both the classification and LTR models."
+                "so importance isn't diluted across redundant features."
             )
             import plotly.express as px
 
@@ -1868,59 +1607,6 @@ elif page == "Model Training":
                         st.markdown("  " + ", ".join(f"`{m}`" for m in members))
                     else:
                         st.markdown(f"`{name}` (importance: {imp})")
-
-    # ---- Gain Chart ----
-    if "training_metrics" in st.session_state:
-        gain_data = st.session_state["training_metrics"].get("gain_chart")
-        if gain_data and gain_data.get("percentages"):
-            import plotly.graph_objects as go  # noqa: F811
-
-            st.markdown("---")
-            st.subheader("Cumulative Gain Chart")
-            st.markdown(
-                "Shows the percentage of actual 20%+ gainers captured when "
-                "scoring the population from highest to lowest predicted "
-                "probability. The further the model curve is above the "
-                "diagonal (random), the better it is at ranking stocks."
-            )
-
-            fig_gain = go.Figure()
-            fig_gain.add_trace(go.Scatter(
-                x=gain_data["percentages"],
-                y=gain_data["gains"],
-                mode="lines+markers",
-                name="Model",
-                line=dict(color="#636EFA", width=2),
-                marker=dict(size=5),
-            ))
-            fig_gain.add_trace(go.Scatter(
-                x=gain_data["percentages"],
-                y=gain_data["random"],
-                mode="lines",
-                name="Random (baseline)",
-                line=dict(color="gray", width=1, dash="dash"),
-            ))
-            fig_gain.update_layout(
-                xaxis_title="% of Population (ranked by model score)",
-                yaxis_title="% of Actual Positives Captured",
-                height=450,
-                legend=dict(yanchor="bottom", y=0.05, xanchor="right", x=0.95),
-                hovermode="x unified",
-            )
-            st.plotly_chart(fig_gain, use_container_width=True)
-
-    # Model status (if no metrics in session)
-    if "training_metrics" not in st.session_state:
-        st.markdown("---")
-        st.subheader("Model Status")
-        try:
-            predictor = StockReturnPredictor()
-            predictor.load()
-            st.success("Trained model found and loaded successfully.")
-            ltr_status = "with LTR" if predictor.ltr_model is not None else "classification only"
-            st.info(f"Model type: ensemble ({ltr_status}). Train a new model above to see detailed metrics.")
-        except FileNotFoundError:
-            st.warning("No trained model found. Train the model above.")
 
 
 # ---------------------------------------------------------------------------
