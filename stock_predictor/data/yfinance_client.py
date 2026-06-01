@@ -79,9 +79,12 @@ def fetch_all_nasdaq_tickers(
         except (FileNotFoundError, json.JSONDecodeError):
             pass
 
-    # Only fetch market cap for tickers not already in cache
-    to_fetch = sorted(all_symbols - set(mcap_cache.keys()))
-    logger.info("Need market cap for %d new tickers", len(to_fetch))
+    # Fetch market cap for new tickers AND retry previously failed ones (None)
+    failed_syms = {k for k, v in mcap_cache.items() if v is None}
+    to_fetch = sorted((all_symbols - set(mcap_cache.keys())) | (all_symbols & failed_syms))
+    if failed_syms & all_symbols:
+        logger.info("Retrying %d previously failed tickers", len(failed_syms & all_symbols))
+    logger.info("Need market cap for %d tickers", len(to_fetch))
 
     for i, sym in enumerate(to_fetch):
         try:
@@ -89,9 +92,10 @@ def fetch_all_nasdaq_tickers(
             mcap_cache[sym] = info.get("marketCap", 0) or 0
         except Exception:
             mcap_cache[sym] = None
+        if (i + 1) % 10 == 0:
+            time.sleep(0.5)  # rate limit — brief pause every 10 tickers
         if (i + 1) % 50 == 0:
             logger.info("Market cap progress: %d / %d", i + 1, len(to_fetch))
-            time.sleep(1)  # rate limit
             # Checkpoint the cache
             if cache_path:
                 try:

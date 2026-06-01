@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 
 # File-based cache for the eligible ticker universe.
 _TICKER_CACHE_PATH = Path(__file__).resolve().parent.parent.parent / "eligible_tickers_cache.json"
+_MCAP_CACHE_PATH = str(Path(__file__).resolve().parent.parent.parent / "market_cap_cache.json")
 _TICKER_CACHE_MAX_AGE_HOURS = 24  # refresh if older than this
 
 # ---------------------------------------------------------------------------
-# Dynamic index-ticker fetching (>= $100M market cap, NASDAQ-only)
+# Dynamic index-ticker fetching (>= $500M market cap, NASDAQ-only)
 # ---------------------------------------------------------------------------
 
 # Fallback curated list in case dynamic fetch fails
@@ -76,6 +77,7 @@ def _fetch_index_tickers_cached() -> frozenset[str]:
     try:
         tickers = fetch_all_nasdaq_tickers(
             min_market_cap=MIN_MARKET_CAP,
+            cache_path=_MCAP_CACHE_PATH,
         )
         if tickers:
             return frozenset(tickers)
