@@ -69,10 +69,17 @@ def run_daily_picks(
     *,
     csv_path: Path | str | None = None,
     top_k: int = 10,
+    save_to_csv: bool = True,
 ) -> pd.DataFrame:
-    """Generate today's top-K stock picks and append to the CSV.
+    """Generate today's top-K stock picks.
 
-    Returns a DataFrame of the picks that were recorded.
+    When *save_to_csv* is True (default, used by the scheduler), picks are
+    only recorded to the CSV when the elite pool >= 75 (MIN_ELITE_POOL).
+    When *save_to_csv* is False (used by Top Recommendations in Streamlit),
+    picks are always returned for display regardless of pool size, and the
+    CSV is never touched.
+
+    Returns a DataFrame of the picks.
     """
     from stock_predictor.models.automl_model import StockReturnPredictor
 
@@ -81,25 +88,22 @@ def run_daily_picks(
 
     today_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Check if today's picks already exist
-    try:
-        existing = pd.read_csv(csv_path)
-        if "date" in existing.columns and not existing.empty and today_str in existing["date"].values:
-            logger.info("Picks for %s already recorded — skipping.", today_str)
-            return existing[existing["date"] == today_str]
-    except Exception:
-        logger.warning("Could not read existing CSV at %s — will regenerate.", csv_path)
-        csv_path.unlink(missing_ok=True)
-        _ensure_csv(csv_path)
+    # Check if today's picks already exist in CSV
+    if save_to_csv:
+        try:
+            existing = pd.read_csv(csv_path)
+            if "date" in existing.columns and not existing.empty and today_str in existing["date"].values:
+                logger.info("Picks for %s already recorded — skipping.", today_str)
+                return existing[existing["date"] == today_str]
+        except Exception:
+            logger.warning("Could not read existing CSV at %s — will regenerate.", csv_path)
+            csv_path.unlink(missing_ok=True)
+            _ensure_csv(csv_path)
 
     predictor = StockReturnPredictor()
     predictor.load()
 
     # ── Fast batch scoring using cached training data ─────────────────
-    # Load the latest row per ticker from the training CSV (all 670
-    # tickers, pre-computed features) and score them in a single batch.
-    # Only falls back to slow per-ticker yFinance fetching if the cache
-    # is missing or stale (>7 days old).
     top_picks = _batch_score_from_cache(
         predictor,
         top_k=top_k,
@@ -109,13 +113,14 @@ def run_daily_picks(
         logger.warning("No valid predictions — pipeline produced 0 picks.")
         return pd.DataFrame(columns=CSV_COLUMNS)
 
-    # Gate: only record picks when elite pool >= MIN_ELITE_POOL (75)
     from stock_predictor.models.automl_model import MIN_ELITE_POOL
 
     pool_size = top_picks[0].get("elite_pool_size", 0)
-    if pool_size < MIN_ELITE_POOL:
+
+    # When saving to CSV (scheduler), gate on pool >= MIN_ELITE_POOL
+    if save_to_csv and pool_size < MIN_ELITE_POOL:
         logger.info(
-            "Elite pool %d < %d — skipping picks for %s (weak signal day)",
+            "Elite pool %d < %d — skipping CSV for %s (weak signal day)",
             pool_size, MIN_ELITE_POOL, today_str,
         )
         return pd.DataFrame(columns=CSV_COLUMNS)
@@ -124,16 +129,13 @@ def run_daily_picks(
     for rank, r in enumerate(top_picks, 1):
         ticker = r["ticker"]
 
-        # Fetch sentiment (lightweight — only for top-K picks)
         sentiment_data = _safe_sentiment(ticker)
         sentiment_score = sentiment_data.get("sentiment_mean_polarity", 0.0)
         sentiment_mentions = sentiment_data.get("sentiment_total_mentions", 0)
 
-        # SHAP explanations — pass cached feature row instead of ticker string
         feature_row = r.get("_feature_row")
         shap_str = _get_shap_explanation(predictor, ticker, feature_row=feature_row)
 
-        # Use data already fetched by _batch_score_from_cache
         close_price = r.get("last_close")
         market_cap = r.get("market_cap")
         sector = r.get("sector", "N/A")
@@ -168,10 +170,15 @@ def run_daily_picks(
         }
         rows.append(row)
 
-    # Append to CSV
     df_new = pd.DataFrame(rows)
-    df_new.to_csv(csv_path, mode="a", header=False, index=False)
-    logger.info("Recorded %d picks for %s", len(rows), today_str)
+
+    # Only write to CSV when save_to_csv=True and pool gate passed
+    if save_to_csv:
+        df_new.to_csv(csv_path, mode="a", header=False, index=False)
+        logger.info("Recorded %d picks for %s", len(rows), today_str)
+    else:
+        logger.info("Generated %d picks for display (pool=%d, not saved to CSV)", len(rows), pool_size)
+
     return df_new
 
 
