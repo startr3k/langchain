@@ -54,7 +54,7 @@ from stock_predictor.data.feature_engineering import (
     build_training_dataset,
     build_training_row,
 )
-from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
+from stock_predictor.config import get_eligible_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ class StockReturnPredictor:
         """
         if df is None:
             if tickers is None:
-                tickers = NASDAQ_TOP_TICKERS[:30]
+                tickers = get_eligible_tickers()
 
             logger.info("Building training dataset for %d tickers...", len(tickers))
             df = build_training_dataset(tickers, include_sentiment=include_sentiment)

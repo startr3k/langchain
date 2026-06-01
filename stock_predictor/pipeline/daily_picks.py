@@ -648,15 +648,14 @@ def _slow_scan_tickers(
     *,
     top_k: int = 10,
 ) -> list[dict]:
-    """Fallback: scan tickers one-by-one via yFinance (slow)."""
-    from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
+    """Fallback: scan tickers one-by-one via yFinance (slow).
 
-    tickers_to_scan: list[str] = list(NASDAQ_TOP_TICKERS)
-    try:
-        sp500 = _get_major_index_tickers()
-        tickers_to_scan = list(set(tickers_to_scan) | set(sp500))
-    except Exception:
-        logger.warning("Could not fetch index tickers, using NASDAQ list only")
+    Loads eligible tickers from ``market_cap_cache.json`` using the market cap
+    threshold in ``ticker_universe.yaml``.
+    """
+    from stock_predictor.config import get_eligible_tickers
+
+    tickers_to_scan = get_eligible_tickers()
 
     logger.info("Slow scan: %d tickers via yFinance...", len(tickers_to_scan))
 
