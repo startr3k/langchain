@@ -132,7 +132,7 @@ def social_media_listener_tool(ticker: str) -> str:
 
 
 @tool
-def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> str:
+def stock_predictor_tool(ticker: str) -> str:
     """Predict the 3-month forward return for a stock using the trained AutoML model.
 
     This tool combines YFinance data and social media sentiment features, then
@@ -141,8 +141,6 @@ def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> s
 
     Args:
         ticker: Stock ticker symbol (e.g. 'AAPL', 'NVDA', 'TSLA').
-        min_market_cap_millions: Minimum market cap in millions of dollars.
-            Default 100 ($100M). Use 1000 for high-conviction large-cap mode.
 
     Returns:
         JSON with the predicted 3-month return percentage and model confidence.
@@ -155,9 +153,7 @@ def stock_predictor_tool(ticker: str, min_market_cap_millions: float = 100) -> s
             "ticker": ticker,
         })
 
-    result = predictor.predict_ticker(
-        ticker, min_market_cap=min_market_cap_millions * 1_000_000
-    )
+    result = predictor.predict_ticker(ticker)
 
     # Add feature importance context
     importance = predictor.get_feature_importance(top_n=10)
@@ -222,19 +218,18 @@ def scan_trending_stocks_tool(top_n: int = 10) -> str:
 
 
 @tool
-def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.0) -> str:
+def scan_full_universe_tool(top_n: int = 10) -> str:
     """Scan ALL 616 NASDAQ tickers from the training dataset and rank by predicted returns.
 
-    Uses the cached training data to batch-score every ticker in ~5 seconds,
-    then filters by market cap and returns the top-N ranked picks. This is
-    the same logic as the daily picks pipeline.
+    Uses the cached training data to batch-score every ticker in ~5 seconds
+    and returns the top-N ranked picks. This is the same logic as the daily
+    picks pipeline.
 
     Use this tool when the user wants comprehensive "best picks" across the
     entire stock universe — not just trending stocks.
 
     Args:
         top_n: Number of top picks to return (default 10).
-        min_market_cap_billions: Minimum market cap filter in billions (default 1.0).
 
     Returns:
         JSON with the top-N ranked stocks by ensemble score, including
@@ -302,14 +297,6 @@ def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.
         scored["z_ltr"] = z_ltr_arr
     scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
 
-    # Filter by eligible ticker universe (>= min market cap)
-    try:
-        from stock_predictor.pipeline.social_listener import get_eligible_tickers
-        eligible_set = get_eligible_tickers()
-        scored = scored[scored["ticker"].isin(eligible_set)].reset_index(drop=True)
-    except Exception:
-        logger.warning("Could not load eligible ticker cache — returning unfiltered results")
-
     top_picks = scored.head(top_n)
 
     results = []
@@ -337,8 +324,7 @@ def scan_full_universe_tool(top_n: int = 10, min_market_cap_billions: float = 1.
                 else "Weak — consider sitting out"
             ),
             "top_picks": results,
-            "min_market_cap_filter": f"${min_market_cap_billions}B",
-            "source": "Full 616-ticker NASDAQ training universe",
+            "source": "Full NASDAQ training universe",
         },
         indent=2,
         default=str,

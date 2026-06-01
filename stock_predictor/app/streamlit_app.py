@@ -113,11 +113,26 @@ page = st.sidebar.radio(
 if page == "Top Recommendations":
     st.title("Top Stock Recommendations")
     st.markdown(
-        "Shows the **top daily stock picks** from the 616 NASDAQ-only ticker universe "
-        "(≥$100M market cap).  Loads instantly from the "
-        "daily picks pipeline if it has already run today.  "
+        "Shows the **top daily stock picks** from the NASDAQ ticker universe.  "
+        "Loads instantly from the daily picks pipeline if it has already run today.  "
         "🔥 = also trending on social media."
     )
+
+    def _fmt_mcap(val) -> str:
+        """Format market cap as human-readable string."""
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return "N/A"
+        if v <= 0:
+            return "N/A"
+        if v >= 1e12:
+            return f"${v / 1e12:.1f}T"
+        if v >= 1e9:
+            return f"${v / 1e9:.1f}B"
+        if v >= 1e6:
+            return f"${v / 1e6:.0f}M"
+        return f"${v:,.0f}"
 
     # ── Helper: load today's picks from the daily_picks CSV ──────────
     def _load_todays_picks() -> pd.DataFrame | None:
@@ -169,7 +184,7 @@ if page == "Top Recommendations":
                 "Ticker Calibration": float(row.get("ticker_calibration", 1.0)),
                 "Sentiment Polarity": round(sent_score, 3),
                 "Total Mentions": int(row.get("sentiment_mentions", 0)),
-                "Market Cap": row.get("market_cap"),
+                "Market Cap": _fmt_mcap(row.get("market_cap")),
                 "Sector": row.get("sector", "N/A"),
                 "Close Price": row.get("close_price"),
                 "SHAP Explanation": shap_str if pd.notna(shap_str) else "",
@@ -220,13 +235,11 @@ if page == "Top Recommendations":
                 pass
 
         with st.spinner(
-            "Re-running daily picks pipeline on 616 NASDAQ-only universe "
-            "(≥$100M market cap)..."
+            "Re-running daily picks pipeline on NASDAQ universe..."
         ):
             try:
                 new_picks = run_daily_picks(
                     top_k=max(top_x, 10),
-                    min_market_cap=1_000_000_000,
                 )
                 if new_picks is not None and not new_picks.empty:
                     today_picks = new_picks
@@ -324,10 +337,12 @@ if page == "Top Recommendations":
         score = r.get("Score", 0)
         pool = r.get("Elite Pool Size", 0)
 
+        mcap_str = r.get("Market Cap", "N/A")
         with st.expander(
             f"**{ticker_name}** — P: {cls_p:.1%} | "
             f"MFD: {pred_mfd:.1%} | "
             f"Score: {score:.3f} | "
+            f"MCap: {mcap_str} | "
             f"Sector: {r.get('Sector', 'N/A')}"
         ):
             # 4-stage pipeline scores
@@ -354,8 +369,8 @@ if page == "Top Recommendations":
                 help="max(Z_cls, 0) × max(Z_ltr, 0) — both must be above avg",
             )
 
-            # Pool size and signal strength
-            col6, col7, col8, col9 = st.columns(4)
+            # Pool size, market cap, and signal strength
+            col6, col7, col8, col9, col_mc = st.columns(5)
             col6.metric(
                 "Elite Pool", pool,
                 help="Stocks passing both gates today. ≥75 = strong signal",
@@ -368,6 +383,10 @@ if page == "Top Recommendations":
             )
             if r.get("Close Price"):
                 col9.metric("Last Close", f"${r['Close Price']:.2f}")
+            col_mc.metric(
+                "Market Cap", mcap_str,
+                help="Current market cap (informational, not used for filtering)",
+            )
 
             # Additional context
             regime_conf = r.get("Regime Confidence", "N/A")
@@ -1472,8 +1491,7 @@ elif page == "Batch Predictions":
 elif page == "Social Media Listener":
     st.title("🔥 Social Media Listener")
     st.markdown(
-        "Top 20 hottest stocks — filtered to **616 NASDAQ-only** "
-        "listed stocks with **≥ $100M market cap** only.  "
+        "Top 20 hottest stocks — filtered to **NASDAQ-listed** stocks.  "
         "Data sourced from Reddit, Yahoo Finance (trending, most active, day movers), "
         "Finviz news headlines, and GDELT global news."
     )
@@ -1486,10 +1504,10 @@ elif page == "Social Media Listener":
             if cache_info["cached"]:
                 st.write(
                     f"**{len(eligible)}** NASDAQ tickers "
-                    f"with ≥$100M market cap (cached {cache_info['age_hours']}h ago)"
+                    f"(cached {cache_info['age_hours']}h ago)"
                 )
             else:
-                st.write(f"**{len(eligible)}** NASDAQ tickers with ≥$100M market cap")
+                st.write(f"**{len(eligible)}** NASDAQ tickers")
         with col_u2:
             if st.button("🔄 Refresh Tickers", key="refresh_tickers"):
                 with st.spinner("Fetching tickers from Wikipedia + yFinance..."):
@@ -1551,8 +1569,8 @@ elif page == "Daily Picks Pipeline":
     st.title("📋 Daily Picks Pipeline (MLOps)")
     st.markdown(
         "Schedule automated daily stock pick generation.  The pipeline "
-        "scores all tickers from the training universe, filters by market "
-        "cap, and records the top picks with SHAP explanations and sentiment "
+        "scores all tickers from the training universe and records the top "
+        "picks with SHAP explanations, sentiment, and market cap "
         "to a CSV.  Use the ground-truth evaluator to track precision over time."
     )
 
@@ -1601,21 +1619,12 @@ elif page == "Daily Picks Pipeline":
                 index=7,
                 key="sched_dow",
             )
-            sched_mcap = st.selectbox(
-                "Min market cap (schedule)",
-                [("$100M", 100_000_000), ("$500M", 500_000_000), ("$1B", 1_000_000_000)],
-                format_func=lambda x: x[0],
-                index=2,
-                key="sched_mcap",
-            )
-
         if st.button("💾 Save & Start Schedule", type="primary"):
             result = schedule_pipeline(
                 hour=sched_hour,
                 minute=sched_minute,
                 frequency=sched_freq,
                 day_of_week=sched_dow,
-                min_market_cap=sched_mcap[1],
             )
             st.success(
                 f"Schedule saved! Next run: {result.get('next_run', 'N/A')}"

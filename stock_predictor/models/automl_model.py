@@ -1907,7 +1907,6 @@ class StockReturnPredictor:
     def predict_ticker(
         self,
         ticker: str,
-        min_market_cap: float = 100_000_000,
         include_explanation: bool = False,
     ) -> dict:
         """Predict whether a ticker will hit >=20% peak return within 3 months.
@@ -1917,32 +1916,19 @@ class StockReturnPredictor:
 
         Args:
             ticker: Stock ticker symbol.
-            min_market_cap: Minimum market cap filter in dollars.
-                Default $100M (training universe). Use 1_000_000_000
-                for high-conviction large-cap mode.
             include_explanation: If True, compute SHAP explanation for the
                 prediction. Adds ~50ms per call. Default False.
 
         Returns:
             Dict with ticker, probability, and classification.
         """
-        # Market cap gate
+        # Fetch market cap (informational, no filtering)
         try:
             import yfinance as yf
             info = yf.Ticker(ticker).info
             mcap = info.get("marketCap") or 0
         except Exception:
             mcap = 0
-
-        if mcap < min_market_cap:
-            return {
-                "ticker": ticker,
-                "probability_gain": None,
-                "prediction": None,
-                "market_cap": mcap,
-                "min_market_cap": min_market_cap,
-                "error": f"Market cap ${mcap/1e6:.0f}M below ${min_market_cap/1e6:.0f}M threshold.",
-            }
 
         row = build_training_row(ticker, include_sentiment=True)
         if row is None:
@@ -1991,7 +1977,6 @@ class StockReturnPredictor:
             "regime_confidence": round(regime_conf, 3),
             "ticker_calibration": cal_factor,
             "market_cap": mcap,
-            "min_market_cap": min_market_cap,
             "explanation": explanation,
         }
 

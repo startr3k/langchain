@@ -69,7 +69,6 @@ def run_daily_picks(
     *,
     csv_path: Path | str | None = None,
     top_k: int = 10,
-    min_market_cap: float = 100_000_000,
 ) -> pd.DataFrame:
     """Generate today's top-K stock picks and append to the CSV.
 
@@ -104,7 +103,6 @@ def run_daily_picks(
     top_picks = _batch_score_from_cache(
         predictor,
         top_k=top_k,
-        min_market_cap=min_market_cap,
     )
 
     if not top_picks:
@@ -280,7 +278,6 @@ def _batch_score_from_cache(
     predictor,
     *,
     top_k: int = 10,
-    min_market_cap: float = 100_000_000,
 ) -> list[dict]:
     """Score all tickers from the cached training CSV in one batch.
 
@@ -293,7 +290,7 @@ def _batch_score_from_cache(
     """
     if not _TRAINING_CSV_PATH.exists():
         logger.warning("Training cache not found at %s — falling back to slow scan", _TRAINING_CSV_PATH)
-        return _slow_scan_tickers(predictor, top_k=top_k, min_market_cap=min_market_cap)
+        return _slow_scan_tickers(predictor, top_k=top_k)
 
     logger.info("Loading cached training data from %s ...", _TRAINING_CSV_PATH)
     cache_df = pd.read_csv(_TRAINING_CSV_PATH)
@@ -302,7 +299,7 @@ def _batch_score_from_cache(
     date_col = "_date" if "_date" in cache_df.columns else "date"
     if date_col not in cache_df.columns:
         logger.warning("Training CSV has no date column — falling back to slow scan")
-        return _slow_scan_tickers(predictor, top_k=top_k, min_market_cap=min_market_cap)
+        return _slow_scan_tickers(predictor, top_k=top_k)
     cache_df["_date"] = pd.to_datetime(cache_df[date_col])
     latest_idx = cache_df.groupby("Ticker")["_date"].idxmax()
     latest_df = cache_df.loc[latest_idx].copy().reset_index(drop=True)
@@ -367,24 +364,11 @@ def _batch_score_from_cache(
     scored = scored.sort_values("ensemble_score", ascending=False).reset_index(drop=True)
 
     import yfinance as yf
-    from stock_predictor.pipeline.social_listener import get_eligible_tickers
 
-    # Use the cached eligible ticker universe (616 NASDAQ-only, >= $100M)
-    # instead of querying yfinance for all tickers each run.
-    eligible_set = get_eligible_tickers()
     all_tickers = scored["ticker"].tolist()
-    logger.info(
-        "Filtering %d tickers against %d cached eligible tickers (>= $%.0fB)...",
-        len(all_tickers), len(eligible_set), min_market_cap / 1e9,
-    )
 
-    # Fast set-based filter using the cached universe
-    scored["in_eligible_universe"] = scored["ticker"].isin(eligible_set)
-    eligible = scored[scored["in_eligible_universe"]].copy()
-    logger.info("%d tickers pass cached eligible filter", len(eligible))
-
-    # Take top_k from the filtered list
-    top_candidates = eligible.head(top_k)
+    # Take top_k from the scored list (no market cap filtering)
+    top_candidates = scored.head(top_k)
     candidate_tickers = top_candidates["ticker"].tolist()
 
     # ── Batch-fetch close prices via yf.download (single request) ────
@@ -484,7 +468,6 @@ def _slow_scan_tickers(
     predictor,
     *,
     top_k: int = 10,
-    min_market_cap: float = 100_000_000,
 ) -> list[dict]:
     """Fallback: scan tickers one-by-one via yFinance (slow)."""
     from stock_predictor.data.yfinance_client import NASDAQ_TOP_TICKERS
@@ -501,7 +484,7 @@ def _slow_scan_tickers(
     results: list[dict] = []
     for ticker in tickers_to_scan:
         try:
-            result = predictor.predict_ticker(ticker, min_market_cap=min_market_cap)
+            result = predictor.predict_ticker(ticker)
             if result.get("probability_gain") is not None:
                 results.append(result)
         except Exception:
