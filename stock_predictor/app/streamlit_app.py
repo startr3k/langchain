@@ -202,9 +202,21 @@ if page == "Top Recommendations":
     # Priority: session state cache > CSV file.
     # This ensures picks survive page navigation even when pool < 75
     # (not saved to CSV but still in session state).
+    from datetime import date as _date
+    _today_str = _date.today().isoformat()
+
     if "today_picks_cache" in st.session_state and st.session_state["today_picks_cache"] is not None:
-        today_picks = st.session_state["today_picks_cache"]
-        source = "session cache"
+        cached = st.session_state["today_picks_cache"]
+        # Validate cache is from today (stale if session spans midnight)
+        if "date" in cached.columns and (cached["date"] == _today_str).any():
+            today_picks = cached[cached["date"] == _today_str]
+            source = "session cache"
+        else:
+            del st.session_state["today_picks_cache"]
+            today_picks = _load_todays_picks()
+            source = "CSV"
+            if today_picks is not None:
+                st.session_state["today_picks_cache"] = today_picks
     else:
         today_picks = _load_todays_picks()
         source = "CSV"
@@ -478,9 +490,8 @@ if page == "Top Recommendations":
                             )
                             st.session_state[guidance_key] = analysis
                         except Exception as e:
-                            import traceback
+                            logger.exception("Transcript fetch failed for %s", ticker_name)
                             st.error(f"Error fetching transcript: {e}")
-                            st.code(traceback.format_exc())
 
             if guidance_key in st.session_state:
                 analysis = st.session_state[guidance_key]
