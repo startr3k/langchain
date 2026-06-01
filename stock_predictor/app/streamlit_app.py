@@ -40,6 +40,10 @@ from stock_predictor.pipeline.daily_picks import (
 # Separate CSV for Top Recommendations (always written, regardless of pool size).
 # The scheduler's daily_picks.csv is only written when pool >= 75.
 TOP_RECS_CSV_PATH = Path(DEFAULT_CSV_PATH).parent / "top_recommendations.csv"
+
+# Folder for persisting per-ticker social buzz and forward guidance text files.
+TICKER_DATA_DIR = Path(DEFAULT_CSV_PATH).parent / "ticker_data"
+TICKER_DATA_DIR.mkdir(parents=True, exist_ok=True)
 from stock_predictor.pipeline.scheduler import (
     get_schedule_config,
     schedule_pipeline,
@@ -481,23 +485,30 @@ if page == "Top Recommendations":
                     else:
                         st.markdown(f"- {part}")
 
-            # Social media buzz for this ticker
+            # ── Social media buzz ─────────────────────────────────
             st.markdown("---")
             buzz_key = f"buzz_{ticker_name}"
+            from datetime import date as _d
+            _today = _d.today().isoformat()
+            buzz_file = TICKER_DATA_DIR / f"{_today}_{ticker_name}_social_buzz.txt"
+
+            # Cache hierarchy: session state → file → generate
+            if buzz_key not in st.session_state and buzz_file.exists():
+                st.session_state[buzz_key] = {"_from_file": True, "text": buzz_file.read_text()}
+
             if st.button(
                 f"📊 Fetch Social Buzz ({ticker_name})",
                 key=f"btn_buzz_{ticker_name}",
             ):
                 with st.spinner(f"Scanning social media for {ticker_name}..."):
                     try:
-                        import requests
+                        import requests as _req
                         from bs4 import BeautifulSoup
                         from textblob import TextBlob
                         from stock_predictor.data.sentiment import get_sentiment_summary
 
-                        # Fetch Finviz headlines with individual sentiment
                         headlines = []
-                        resp = requests.get(
+                        resp = _req.get(
                             f"https://finviz.com/quote.ashx?t={ticker_name}",
                             headers={"User-Agent": "Mozilla/5.0"},
                             timeout=10,
@@ -515,9 +526,21 @@ if page == "Top Recommendations":
 
                         sentiment_text = get_sentiment_summary(ticker_name)
 
+                        # Build display text and persist to file
+                        lines = [f"Social Media Buzz for {ticker_name} ({_today})", "=" * 50]
+                        for h in headlines:
+                            s = h["sentiment"]
+                            tag = "POS" if s > 0.1 else ("NEG" if s < -0.1 else "NEU")
+                            lines.append(f"[{tag} {s:+.2f}] {h['headline']}")
+                        if sentiment_text:
+                            lines.extend(["", "Sentiment Summary:", sentiment_text])
+                        full_text = "\n".join(lines)
+
+                        buzz_file.write_text(full_text)
                         st.session_state[buzz_key] = {
                             "headlines": headlines,
                             "sentiment_summary": sentiment_text,
+                            "text": full_text,
                         }
                     except Exception as e:
                         logger.exception("Social buzz fetch failed for %s", ticker_name)
@@ -527,23 +550,36 @@ if page == "Top Recommendations":
                 buzz_result = st.session_state[buzz_key]
                 st.markdown(f"**📊 Social Media Buzz for {ticker_name}**")
 
-                headlines = buzz_result.get("headlines", [])
-                if headlines:
-                    for item in headlines:
-                        sent = item["sentiment"]
-                        icon = "🟢" if sent > 0.1 else ("🔴" if sent < -0.1 else "⚪")
-                        st.markdown(f"{icon} {item['headline']} `({sent:+.2f})`")
+                if buzz_result.get("_from_file"):
+                    st.text(buzz_result["text"])
                 else:
-                    st.info("No recent Finviz headlines found.")
+                    headlines = buzz_result.get("headlines", [])
+                    if headlines:
+                        for item in headlines:
+                            sent = item["sentiment"]
+                            icon = "🟢" if sent > 0.1 else ("🔴" if sent < -0.1 else "⚪")
+                            st.markdown(f"{icon} {item['headline']} `({sent:+.2f})`")
+                    else:
+                        st.info("No recent Finviz headlines found.")
 
-                sent_text = buzz_result.get("sentiment_summary", "")
-                if sent_text:
-                    st.markdown("**Sentiment Summary:**")
-                    st.text(sent_text)
+                    sent_text = buzz_result.get("sentiment_summary", "")
+                    if sent_text:
+                        st.markdown("**Sentiment Summary:**")
+                        st.text(sent_text)
 
-            # Forward guidance from earnings call transcript
+            # ── Forward guidance ──────────────────────────────────
             st.markdown("---")
             guidance_key = f"guidance_{ticker_name}"
+            guidance_file = TICKER_DATA_DIR / f"{_today}_{ticker_name}_forward_guidance.txt"
+
+            # Cache hierarchy: session state → file → generate
+            if guidance_key not in st.session_state and guidance_file.exists():
+                st.session_state[guidance_key] = {
+                    "found": True,
+                    "_from_file": True,
+                    "text": guidance_file.read_text(),
+                }
+
             if st.button(
                 f"📞 Fetch Forward Guidance ({ticker_name})",
                 key=f"btn_guidance_{ticker_name}",
@@ -560,6 +596,17 @@ if page == "Top Recommendations":
                                 ticker_name, api_key=api_key,
                                 model=model_choice,
                             )
+                            # Persist to file
+                            if analysis.get("found"):
+                                lines = [
+                                    f"Forward Guidance for {ticker_name} ({_today})",
+                                    "=" * 50,
+                                    f"Transcript date: {analysis.get('date', 'N/A')}",
+                                    f"Source: {analysis.get('source_url', 'N/A')}",
+                                    "",
+                                    analysis.get("forward_guidance", ""),
+                                ]
+                                guidance_file.write_text("\n".join(lines))
                             st.session_state[guidance_key] = analysis
                         except Exception as e:
                             logger.exception("Transcript fetch failed for %s", ticker_name)
@@ -568,15 +615,118 @@ if page == "Top Recommendations":
             if guidance_key in st.session_state:
                 analysis = st.session_state[guidance_key]
                 if analysis.get("found"):
-                    st.markdown(f"**📞 Forward Guidance** (transcript from {analysis.get('date', 'N/A')})")
-                    st.markdown(analysis.get("forward_guidance", "No guidance extracted."))
-                    if analysis.get("source_url"):
-                        st.caption(f"Source: [{analysis['source_url']}]({analysis['source_url']})")
+                    if analysis.get("_from_file"):
+                        st.markdown(f"**📞 Forward Guidance** (loaded from file)")
+                        st.text(analysis["text"])
+                    else:
+                        st.markdown(f"**📞 Forward Guidance** (transcript from {analysis.get('date', 'N/A')})")
+                        st.markdown(analysis.get("forward_guidance", "No guidance extracted."))
+                        if analysis.get("source_url"):
+                            st.caption(f"Source: [{analysis['source_url']}]({analysis['source_url']})")
                 else:
                     st.warning(
                         f"No earnings call transcript found for {ticker_name}. "
                         f"{analysis.get('error', '')}"
                     )
+
+            # ── Chatbot for this ticker ───────────────────────────
+            st.markdown("---")
+            chat_key = f"chat_{ticker_name}"
+            if chat_key not in st.session_state:
+                st.session_state[chat_key] = []
+
+            st.markdown(f"**💬 Ask about {ticker_name}**")
+
+            # Build context from all available data for this ticker
+            def _build_ticker_context(tk: str, result: dict) -> str:
+                parts = [
+                    f"Ticker: {tk}",
+                    f"Sector: {result.get('Sector', 'N/A')}",
+                    f"Market Cap: {result.get('Market Cap', 'N/A')}",
+                    f"Close Price: {result.get('Close Price', 'N/A')}",
+                    f"Signal: {result.get('Signal', 'N/A')}",
+                    f"Classifier P: {result.get('Classifier P', 0):.1%}",
+                    f"Pred MFD: {result.get('Pred MFD', 0):.1%}",
+                    f"Z_cls: {result.get('Z_cls', 0):+.2f}",
+                    f"Z_ltr: {result.get('Z_ltr', 0):+.2f}",
+                    f"Final Score: {result.get('Score', 0):.3f}",
+                    f"Elite Pool Size: {result.get('Elite Pool Size', 0)}",
+                    f"RSI (14): {result.get('RSI (14)', 'N/A')}",
+                    f"Vol Surge 3d: {result.get('Vol Surge 3d', 'N/A')}",
+                    f"Sentiment Polarity: {result.get('Sentiment Polarity', 0):+.3f}",
+                    f"Total Mentions: {result.get('Total Mentions', 0)}",
+                    f"SHAP Explanation: {result.get('SHAP Explanation', '')}",
+                ]
+                # Add social buzz if available
+                bk = f"buzz_{tk}"
+                if bk in st.session_state:
+                    bd = st.session_state[bk]
+                    parts.append(f"\nSocial Media Buzz:\n{bd.get('text', '')}")
+                # Add forward guidance if available
+                gk = f"guidance_{tk}"
+                if gk in st.session_state:
+                    gd = st.session_state[gk]
+                    if gd.get("found"):
+                        if gd.get("_from_file"):
+                            parts.append(f"\nForward Guidance:\n{gd.get('text', '')}")
+                        else:
+                            parts.append(f"\nForward Guidance:\n{gd.get('forward_guidance', '')}")
+                return "\n".join(parts)
+
+            # Display chat history
+            for msg in st.session_state[chat_key]:
+                role_icon = "🧑" if msg["role"] == "user" else "🤖"
+                st.markdown(f"{role_icon} **{msg['role'].title()}:** {msg['content']}")
+
+            chat_col1, chat_col2 = st.columns([5, 1])
+            with chat_col1:
+                user_input = st.text_input(
+                    "Ask anything...",
+                    key=f"chat_input_{ticker_name}",
+                    label_visibility="collapsed",
+                    placeholder=f"Ask about {ticker_name}...",
+                )
+            with chat_col2:
+                send_clicked = st.button("Send", key=f"chat_send_{ticker_name}")
+
+            if send_clicked and user_input:
+                st.session_state[chat_key].append({"role": "user", "content": user_input})
+
+                if not api_key:
+                    st.error("OpenAI API key required for chat.")
+                else:
+                    context = _build_ticker_context(ticker_name, r)
+                    messages = [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a stock analysis assistant. You have detailed data about "
+                                f"the stock {ticker_name} from an AI stock predictor pipeline. "
+                                "Answer the user's questions based on this data. Be concise and "
+                                "data-driven.\n\n"
+                                f"Available data:\n{context}"
+                            ),
+                        },
+                    ]
+                    for msg in st.session_state[chat_key]:
+                        messages.append({"role": msg["role"], "content": msg["content"]})
+
+                    with st.spinner("Thinking..."):
+                        try:
+                            from openai import OpenAI
+                            client = OpenAI(api_key=api_key)
+                            resp = client.chat.completions.create(
+                                model=model_choice,
+                                messages=messages,
+                                max_tokens=1000,
+                            )
+                            reply = resp.choices[0].message.content
+                            st.session_state[chat_key].append(
+                                {"role": "assistant", "content": reply}
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Chat error: {e}")
 
 
 
