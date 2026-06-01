@@ -199,12 +199,22 @@ if page == "Top Recommendations":
         return results
 
     # ── Check for existing pipeline picks ────────────────────────────
-    today_picks = _load_todays_picks()
+    # Priority: session state cache > CSV file.
+    # This ensures picks survive page navigation even when pool < 75
+    # (not saved to CSV but still in session state).
+    if "today_picks_cache" in st.session_state and st.session_state["today_picks_cache"] is not None:
+        today_picks = st.session_state["today_picks_cache"]
+        source = "session cache"
+    else:
+        today_picks = _load_todays_picks()
+        source = "CSV"
+        if today_picks is not None:
+            st.session_state["today_picks_cache"] = today_picks
 
     if today_picks is not None:
         st.success(
-            f"Loaded **{len(today_picks)} picks** from today's pipeline run. "
-            "Data shown instantly from cached results."
+            f"Loaded **{len(today_picks)} picks** from {source}. "
+            "Click Regenerate to re-run."
         )
 
     col_cfg1, col_cfg2 = st.columns([1, 2])
@@ -246,6 +256,9 @@ if page == "Top Recommendations":
                 if new_picks is not None and not new_picks.empty:
                     today_picks = new_picks
                     from_pipeline = True
+
+                    # Always cache in session state for page navigation
+                    st.session_state["today_picks_cache"] = new_picks
 
                     pool_size = int(new_picks["elite_pool_size"].iloc[0]) if "elite_pool_size" in new_picks.columns else 0
 
@@ -465,7 +478,9 @@ if page == "Top Recommendations":
                             )
                             st.session_state[guidance_key] = analysis
                         except Exception as e:
+                            import traceback
                             st.error(f"Error fetching transcript: {e}")
+                            st.code(traceback.format_exc())
 
             if guidance_key in st.session_state:
                 analysis = st.session_state[guidance_key]
