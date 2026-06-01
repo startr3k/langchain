@@ -211,6 +211,13 @@ CLS_PROB_THRESHOLD = 0.50    # Stage 1: classifier gate
 MFD_PRED_THRESHOLD = 0.25    # Stage 2: Huber MFD gate (predicted MFD >= 25%)
 MIN_ELITE_POOL = 75          # Minimum elite pool size to generate picks
 
+# Exponential fold weights for ensemble inference.
+# Later folds (trained on more data) get exponentially higher weight.
+# [1, 2, 4, 8, 16] for 5 folds → Fold 5 gets ~52% weight.
+FOLD_WEIGHTS_RAW = [1, 2, 4, 8, 16]
+_fw_sum = sum(FOLD_WEIGHTS_RAW)
+FOLD_WEIGHTS = [w / _fw_sum for w in FOLD_WEIGHTS_RAW]
+
 # Legacy ensemble weights (kept for backward compat in predict_batch fallback)
 W_CLS = 0.30
 W_LTR = 0.40
@@ -1644,6 +1651,9 @@ class StockReturnPredictor:
     def predict(self, features: dict | pd.DataFrame) -> float:
         """Predict probability of >=20% peak return within 3 months.
 
+        Uses exponential-weighted fold ensemble when walk-forward fold
+        models are available, falling back to legacy single-model inference.
+
         Args:
             features: Feature dict or DataFrame row.
 
@@ -1665,13 +1675,47 @@ class StockReturnPredictor:
         for col in self.feature_names:
             if col not in df.columns:
                 df[col] = 0.0
-        df = df[self.feature_names]
-        if self.feature_medians is not None:
-            df = df.fillna(self.feature_medians)
-        else:
-            df = df.fillna(0.0)
+        df_features = df[self.feature_names].copy()
 
-        proba = self.automl.predict_proba(df)
+        # --- Walk-forward fold ensemble (preferred) ---
+        if self.fold_models and any(fm.get("huber_model") is not None for fm in self.fold_models):
+            n_folds_actual = len(self.fold_models)
+            if n_folds_actual <= len(FOLD_WEIGHTS):
+                weights = FOLD_WEIGHTS[-n_folds_actual:]
+            else:
+                weights = [1.0 / n_folds_actual] * n_folds_actual
+            w_arr = np.array(weights)
+            w_arr = w_arr / w_arr.sum()
+
+            weighted_proba = 0.0
+            for fi, fm in enumerate(self.fold_models):
+                fm_medians = fm.get("feature_medians")
+                fm_clip = fm.get("clip_bounds", {})
+                df_fold = df_features.copy()
+
+                if fm_medians is not None:
+                    for col in self.feature_names:
+                        if col in fm_medians.index:
+                            df_fold[col] = df_fold[col].fillna(fm_medians[col])
+                else:
+                    df_fold = df_fold.fillna(0.0)
+                for col, (lo, hi) in fm_clip.items():
+                    if col in df_fold.columns and lo < hi:
+                        df_fold[col] = df_fold[col].clip(lo, hi)
+
+                proba = fm["automl"].predict_proba(df_fold)
+                cls_prob = float(proba[0, 1] if proba.ndim == 2 else proba[0])
+                weighted_proba += w_arr[fi] * cls_prob
+
+            return weighted_proba
+
+        # --- Legacy single-model fallback ---
+        if self.feature_medians is not None:
+            df_features = df_features.fillna(self.feature_medians)
+        else:
+            df_features = df_features.fillna(0.0)
+
+        proba = self.automl.predict_proba(df_features)
         if proba.ndim == 2:
             cls_score = float(proba[0, 1])
         else:
@@ -1681,14 +1725,14 @@ class StockReturnPredictor:
         has_reg = self.regression_model is not None
 
         if has_ltr:
-            dmat = xgb.DMatrix(df)
+            dmat = xgb.DMatrix(df_features)
             ltr_score = float(self.ltr_model.predict(dmat)[0])
             ltr_norm = 1.0 / (1.0 + np.exp(-ltr_score))
         else:
             ltr_norm = None
 
         if has_reg:
-            reg_pred = float(self.regression_model.predict(df)[0])
+            reg_pred = float(self.regression_model.predict(df_features)[0])
             reg_norm = 1.0 / (1.0 + np.exp(-reg_pred * 2))
         else:
             reg_norm = None
@@ -1718,7 +1762,8 @@ class StockReturnPredictor:
           4. LTR score on quantile-transformed features
 
         Final score = max(Z_cls, 0) * max(Z_ltr, 0) * pool_weight,
-        averaged across folds. pool_weight = min(pool/75, 2.0).
+        exponential-weighted across folds [1,2,4,8,16].
+        pool_weight = min(pool/75, 2.0).
         Stocks that don't pass both gates get score 0.
 
         Also returns elite_pool_size and individual stage scores as
@@ -1822,17 +1867,27 @@ class StockReturnPredictor:
                 all_fold_proba.append(cls_prob)
                 all_fold_mfd.append(pred_mfd)
 
-            scores = np.mean(all_fold_scores, axis=0)
+            # Exponential-weighted average across folds
+            n_folds_actual = len(all_fold_scores)
+            if n_folds_actual <= len(FOLD_WEIGHTS):
+                # Use the last n weights (so the last fold always gets highest weight)
+                weights = FOLD_WEIGHTS[-n_folds_actual:]
+            else:
+                weights = [1.0 / n_folds_actual] * n_folds_actual
+            w_arr = np.array(weights)
+            w_arr = w_arr / w_arr.sum()  # renormalize
+            scores = sum(w * s for w, s in zip(w_arr, all_fold_scores))
 
             # Store per-stock stage details for UI display
-            avg_proba = np.mean(all_fold_proba, axis=0)
-            avg_mfd = np.mean(all_fold_mfd, axis=0)
+            avg_proba = sum(w * p for w, p in zip(w_arr, all_fold_proba))
+            avg_mfd = sum(w * m for w, m in zip(w_arr, all_fold_mfd))
             # Compute average Z-scores across folds for each stock
             n = len(df_fold)
             avg_z_cls = np.zeros(n)
             avg_z_ltr = np.zeros(n)
-            n_folds_with_elite = 0
+            total_weight_with_elite = 0.0
             for fi, fm in enumerate(self.fold_models):
+                fw = float(w_arr[fi])
                 fs = all_fold_scores[fi]
                 fp = all_fold_proba[fi]
                 elite_mask = fs > 0
@@ -1840,17 +1895,17 @@ class StockReturnPredictor:
                     ep = fp[elite_mask]
                     p_mu, p_sig = ep.mean(), ep.std()
                     z_c = (fp - p_mu) / p_sig if p_sig > 1e-8 else np.zeros(n)
-                    avg_z_cls += z_c
+                    avg_z_cls += fw * z_c
                     # Approximate Z_ltr from fold scores
                     elite_fs = fs[elite_mask]
                     l_mu, l_sig = elite_fs.mean(), elite_fs.std()
                     z_l = np.zeros(n)
                     z_l[elite_mask] = (fs[elite_mask] - l_mu) / l_sig if l_sig > 1e-8 else 0
-                    avg_z_ltr += z_l
-                    n_folds_with_elite += 1
-            if n_folds_with_elite > 0:
-                avg_z_cls /= n_folds_with_elite
-                avg_z_ltr /= n_folds_with_elite
+                    avg_z_ltr += fw * z_l
+                    total_weight_with_elite += fw
+            if total_weight_with_elite > 0:
+                avg_z_cls /= total_weight_with_elite
+                avg_z_ltr /= total_weight_with_elite
 
             elite_pool_size = int((scores > 0).sum())
             self._last_batch_details = {
