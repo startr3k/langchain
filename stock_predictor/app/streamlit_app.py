@@ -140,6 +140,21 @@ if page == "Top Recommendations":
             return f"${v / 1e6:.0f}M"
         return f"${v:,.0f}"
 
+    def _fmt_rsi(val) -> str:
+        """Format RSI with Overbought/Oversold label."""
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return "N/A"
+        if pd.isna(v):
+            return "N/A"
+        if v >= 70:
+            return f"{v:.1f} (Overbought)"
+        elif v <= 30:
+            return f"{v:.1f} (Oversold)"
+        else:
+            return f"{v:.1f}"
+
     # ── Helper: load today's picks from the daily_picks CSV ──────────
     def _load_todays_picks() -> pd.DataFrame | None:
         """Return today's picks from the CSV, or None if not available."""
@@ -190,6 +205,7 @@ if page == "Top Recommendations":
                 "Ticker Calibration": float(row.get("ticker_calibration", 1.0)),
                 "Sentiment Polarity": round(sent_score, 3),
                 "Total Mentions": int(row.get("sentiment_mentions", 0)),
+                "RSI (14)": _fmt_rsi(row.get("rsi_14")),
                 "Market Cap": _fmt_mcap(row.get("market_cap")),
                 "Sector": row.get("sector", "N/A"),
                 "Close Price": row.get("close_price"),
@@ -468,6 +484,66 @@ if page == "Top Recommendations":
                             st.markdown(f"- {part}")
                     else:
                         st.markdown(f"- {part}")
+
+            # Social media buzz for this ticker
+            st.markdown("---")
+            buzz_key = f"buzz_{ticker_name}"
+            if st.button(
+                f"📊 Fetch Social Buzz ({ticker_name})",
+                key=f"btn_buzz_{ticker_name}",
+            ):
+                with st.spinner(f"Scanning social media for {ticker_name}..."):
+                    try:
+                        import requests
+                        from bs4 import BeautifulSoup
+                        from textblob import TextBlob
+                        from stock_predictor.data.sentiment import get_sentiment_summary
+
+                        # Fetch Finviz headlines with individual sentiment
+                        headlines = []
+                        resp = requests.get(
+                            f"https://finviz.com/quote.ashx?t={ticker_name}",
+                            headers={"User-Agent": "Mozilla/5.0"},
+                            timeout=10,
+                        )
+                        if resp.status_code == 200:
+                            soup = BeautifulSoup(resp.text, "html.parser")
+                            news_table = soup.find("table", id="news-table")
+                            if news_table:
+                                for row in news_table.find_all("tr")[:10]:
+                                    link = row.find("a")
+                                    if link:
+                                        text = link.get_text(strip=True)
+                                        polarity = TextBlob(text).sentiment.polarity
+                                        headlines.append({"headline": text, "sentiment": polarity})
+
+                        sentiment_text = get_sentiment_summary(ticker_name)
+
+                        st.session_state[buzz_key] = {
+                            "headlines": headlines,
+                            "sentiment_summary": sentiment_text,
+                        }
+                    except Exception as e:
+                        logger.exception("Social buzz fetch failed for %s", ticker_name)
+                        st.error(f"Error fetching social buzz: {e}")
+
+            if buzz_key in st.session_state:
+                buzz_result = st.session_state[buzz_key]
+                st.markdown(f"**📊 Social Media Buzz for {ticker_name}**")
+
+                headlines = buzz_result.get("headlines", [])
+                if headlines:
+                    for item in headlines:
+                        sent = item["sentiment"]
+                        icon = "🟢" if sent > 0.1 else ("🔴" if sent < -0.1 else "⚪")
+                        st.markdown(f"{icon} {item['headline']} `({sent:+.2f})`")
+                else:
+                    st.info("No recent Finviz headlines found.")
+
+                sent_text = buzz_result.get("sentiment_summary", "")
+                if sent_text:
+                    st.markdown("**Sentiment Summary:**")
+                    st.text(sent_text)
 
             # Forward guidance from earnings call transcript
             st.markdown("---")

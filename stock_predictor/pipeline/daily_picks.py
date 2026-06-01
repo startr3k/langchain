@@ -50,6 +50,7 @@ CSV_COLUMNS = [
     "shap_top_features",
     "market_cap",
     "sector",
+    "rsi_14",
     "max_upside_pct",
     "hit_20pct",
     "ground_truth_date",
@@ -164,6 +165,7 @@ def run_daily_picks(
             "shap_top_features": shap_str,
             "market_cap": market_cap,
             "sector": sector,
+            "rsi_14": round(r.get("rsi_14", 0), 2) if r.get("rsi_14") else None,
             "max_upside_pct": None,
             "hit_20pct": None,
             "ground_truth_date": None,
@@ -171,6 +173,8 @@ def run_daily_picks(
         rows.append(row)
 
     df_new = pd.DataFrame(rows)
+    # Ensure column order matches CSV_COLUMNS to prevent data corruption
+    df_new = df_new.reindex(columns=CSV_COLUMNS)
 
     # Only write to CSV when save_to_csv=True and pool gate passed
     if save_to_csv:
@@ -469,6 +473,7 @@ def _batch_score_from_cache(
             "regime_confidence": round(regime_conf, 3),
             "ticker_calibration": cal_factor,
             "volatility_20d": round(float(row.get("Volatility_20d", 0)), 4) if pd.notna(row.get("Volatility_20d")) else None,
+            "rsi_14": round(float(row.get("RSI_14", 0)), 2) if pd.notna(row.get("RSI_14")) else None,
             "market_cap": mcap,
             "sector": sector,
             "last_close": close_price,
