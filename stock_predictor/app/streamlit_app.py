@@ -1115,6 +1115,18 @@ elif page == "Stock Analysis":
 
         if buzz_file.exists() or guidance_file.exists():
             cache = {"ticker": sa_ticker, "date": _sa_today, "_from_file": True}
+            # Fetch price data so chart renders from cache
+            try:
+                cache["price_df"] = get_stock_data(sa_ticker, period="1y")
+            except Exception:
+                cache["price_df"] = None
+            # Fetch prediction so metrics render from cache
+            try:
+                _restore_pred = StockReturnPredictor()
+                _restore_pred.load()
+                cache["prediction"] = _restore_pred.predict_ticker(sa_ticker, include_explanation=True)
+            except Exception:
+                cache["prediction"] = {}
             if buzz_file.exists():
                 cache["buzz"] = {"_from_file": True, "text": buzz_file.read_text()}
             if guidance_file.exists():
