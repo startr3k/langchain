@@ -140,6 +140,19 @@ if page == "Top Recommendations":
             return f"${v / 1e6:.0f}M"
         return f"${v:,.0f}"
 
+    def _fmt_rsi(val) -> str:
+        """Format RSI with Overbought/Oversold label."""
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return "N/A"
+        if v >= 70:
+            return f"{v:.1f} (Overbought)"
+        elif v <= 30:
+            return f"{v:.1f} (Oversold)"
+        else:
+            return f"{v:.1f}"
+
     # ── Helper: load today's picks from the daily_picks CSV ──────────
     def _load_todays_picks() -> pd.DataFrame | None:
         """Return today's picks from the CSV, or None if not available."""
@@ -190,6 +203,7 @@ if page == "Top Recommendations":
                 "Ticker Calibration": float(row.get("ticker_calibration", 1.0)),
                 "Sentiment Polarity": round(sent_score, 3),
                 "Total Mentions": int(row.get("sentiment_mentions", 0)),
+                "RSI (14)": _fmt_rsi(row.get("rsi_14")),
                 "Market Cap": _fmt_mcap(row.get("market_cap")),
                 "Sector": row.get("sector", "N/A"),
                 "Close Price": row.get("close_price"),
